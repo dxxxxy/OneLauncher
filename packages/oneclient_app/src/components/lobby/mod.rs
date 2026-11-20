@@ -419,7 +419,7 @@ pub fn use_my_uuid() -> Option<Uuid> {
 
 pub fn use_player_name(player: Uuid) -> String {
     let me = try_default_account(&use_current_account());
-    let profile = settled_or_loading(&use_player_profile(player.to_string(), None::<String>));
+    let profile = settled_or_loading(&use_player_profile(player.to_string()));
     match me {
         Some(account) if account.id == player => account.username,
         _ => profile.map_or_else(|| short_player_id(player), |profile| profile.username),

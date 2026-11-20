@@ -13,7 +13,6 @@ pub struct FetchPlayerProfileQuery;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PlayerProfileQueryKeys {
     pub uuid: String,
-    pub access_token: Option<String>,
 }
 
 impl QueryCapability for FetchPlayerProfileQuery {
@@ -22,14 +21,13 @@ impl QueryCapability for FetchPlayerProfileQuery {
     type Keys = PlayerProfileQueryKeys;
 
     async fn run(&self, keys: &Self::Keys) -> Result<Self::Ok, Self::Err> {
-        let access_token = keys.access_token.clone();
-
         let state = crate::launcher::state()?;
         let client = &state.services.requester;
 
         Ok(
-            minecraft::fetch_player_profile_view(client, &keys.uuid, access_token.as_deref())
-                .await?,
+            // public profile only: query keys are cached and printed, so they
+            // must never carry a token
+            minecraft::fetch_player_profile_view(client, &keys.uuid, None).await?,
         )
     }
 
@@ -39,16 +37,10 @@ impl QueryCapability for FetchPlayerProfileQuery {
     // }
 }
 
-pub fn use_player_profile(
-    uuid: impl Into<String>,
-    access_token: Option<impl Into<String>>,
-) -> UseQuery<FetchPlayerProfileQuery> {
+pub fn use_player_profile(uuid: impl Into<String>) -> UseQuery<FetchPlayerProfileQuery> {
     use_query(
         Query::new(
-            PlayerProfileQueryKeys {
-                uuid: uuid.into(),
-                access_token: access_token.map(|s| s.into()),
-            },
+            PlayerProfileQueryKeys { uuid: uuid.into() },
             FetchPlayerProfileQuery,
         )
         .stale_time(PROFILE_STALE)
