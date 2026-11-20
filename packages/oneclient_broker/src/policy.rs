@@ -91,6 +91,8 @@ pub fn decide(method: &str, url: &Url) -> Decision {
         "api.minecraftservices.com" => match path {
             "/player/certificates" if post => Decision::Allow(Plain(Bearer)),
             "/player/attributes" if get || post => Decision::Allow(Plain(Bearer)),
+            // 1.16 to 1.18 read multiplayer and Realms permissions here
+            "/privileges" if get => Decision::Allow(Plain(Bearer)),
             "/privacy/blocklist" if get => Decision::Allow(Plain(Bearer)),
             "/player/report" if post => Decision::Allow(Plain(Bearer)),
             "/publickeys" if get => Decision::Allow(Plain(Public)),
@@ -226,6 +228,10 @@ mod tests {
                 "POST",
                 "https://api.minecraftservices.com/player/certificates"
             ),
+            Decision::Allow(Route::Plain(TokenPlacement::Bearer))
+        );
+        assert_eq!(
+            d("GET", "https://api.minecraftservices.com/privileges"),
             Decision::Allow(Route::Plain(TokenPlacement::Bearer))
         );
         assert_eq!(
