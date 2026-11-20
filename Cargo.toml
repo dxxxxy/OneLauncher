@@ -33,6 +33,7 @@ oneclient_macro = {path = "./packages/oneclient_macro"}
 oneclient_mc = {path = "./packages/oneclient_mc"}
 oneclient_net = {path = "./packages/oneclient_net"}
 oneclient_polyplus = {path = "./packages/oneclient_polyplus"}
+oneclient_broker = {path = "./packages/oneclient_broker"}
 polyio = {path = "./packages/polyio"}
 
 # core (extra)
