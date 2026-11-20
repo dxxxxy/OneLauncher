@@ -141,7 +141,9 @@ final class Bridge {
         if (out != null) return out;
 
         IOException last = null;
-        for (int attempt = 0; attempt < 50; attempt++) {
+        // about 2s in all: long enough for the launcher to recreate its pipes,
+        // short enough that a closed launcher fails a join quickly
+        for (int attempt = 0; attempt < 10; attempt++) {
             try {
                 // up first: on Unix a FIFO's write end only opens once the
                 // launcher holds the read end, which it always does
