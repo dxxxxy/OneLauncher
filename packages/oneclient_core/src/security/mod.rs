@@ -39,6 +39,87 @@ pub struct SecurityService {
     activity: parking_lot::Mutex<VecDeque<Activity>>,
     brokers: parking_lot::Mutex<HashMap<i64, RunningBroker>>,
     protection: parking_lot::Mutex<HashMap<i64, oneclient_sandbox::Protection>>,
+    denied_seen: parking_lot::Mutex<std::collections::HashSet<(i64, String)>>,
+}
+
+static GLOBAL: std::sync::OnceLock<Arc<SecurityService>> = std::sync::OnceLock::new();
+
+/// Lets code without the launcher state (the log tail) report to the service
+pub(crate) fn install_global(service: Arc<SecurityService>) {
+    let _ = GLOBAL.set(service);
+}
+
+/// The path in a Java "access denied" line, if the line is one
+pub(crate) fn denied_path(line: &str) -> Option<String> {
+    for marker in ["AccessDeniedException: ", "FileNotFoundException: "] {
+        let Some(at) = line.find(marker) else {
+            continue;
+        };
+        let rest = line[at + marker.len()..].trim();
+        if marker.starts_with("FileNotFound") {
+            for suffix in [
+                " (Access is denied)",
+                " (Permission denied)",
+                " (Operation not permitted)",
+            ] {
+                if let Some(path) = rest.strip_suffix(suffix) {
+                    return Some(path.to_string());
+                }
+            }
+            return None;
+        }
+        // AccessDeniedException may carry "-> other" or a reason after the path
+        let path = rest.split(" -> ").next().unwrap_or(rest);
+        let path = path.split(": ").next().unwrap_or(path);
+        return Some(path.to_string());
+    }
+    None
+}
+
+/// Called for every game log line. The log is written by the game, so this
+/// only ever informs: it never grants anything by itself
+pub(crate) fn observe_log_line(cluster_id: i64, line: &str, events: &oneclient_events::EventBus) {
+    let Some(service) = GLOBAL.get() else { return };
+    let Some(path) = denied_path(line) else {
+        return;
+    };
+    if !service
+        .denied_seen
+        .lock()
+        .insert((cluster_id, path.clone()))
+    {
+        return;
+    }
+    let sandboxed = service
+        .protection(cluster_id)
+        .is_some_and(|p| p.is_sandboxed());
+    if !sandboxed {
+        return;
+    }
+    if let Some(reason) = oneclient_sandbox::sensitive_reason(Path::new(&path)) {
+        service.push(Activity::now(
+            cluster_id,
+            oneclient_broker::ActivityKind::SensitiveAccess {
+                path: path.clone(),
+                caller: String::new(),
+            },
+        ));
+        events
+            .notify("Blocked a mod from reading private files")
+            .body(format!(
+                "A mod tried to read {path} ({reason}). The sandbox kept it out. Mods have no reason to read this; consider removing ones you don't trust."
+            ))
+            .error()
+            .send();
+    } else if !path.contains(".oneclient") {
+        events
+            .notify("A mod couldn't open a file")
+            .body(format!(
+                "The sandbox blocked {path}. If you trust the mod, share that folder in the instance's Security settings."
+            ))
+            .info()
+            .send();
+    }
 }
 
 impl SecurityService {
@@ -219,4 +300,28 @@ pub(crate) async fn has_voice_mod(mods_dir: &Path) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::denied_path;
+
+    #[test]
+    fn finds_the_path_in_java_access_errors() {
+        assert_eq!(
+            denied_path(r"java.nio.file.AccessDeniedException: C:\Users\me\Downloads\a.png")
+                .as_deref(),
+            Some(r"C:\Users\me\Downloads\a.png")
+        );
+        assert_eq!(
+            denied_path("java.io.FileNotFoundException: /home/me/.ssh/id_rsa (Permission denied)")
+                .as_deref(),
+            Some("/home/me/.ssh/id_rsa")
+        );
+        assert_eq!(
+            denied_path("java.io.FileNotFoundException: config/x.json"),
+            None
+        );
+        assert_eq!(denied_path("[Render thread/INFO]: all good"), None);
+    }
 }

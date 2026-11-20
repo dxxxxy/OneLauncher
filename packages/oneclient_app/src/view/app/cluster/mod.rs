@@ -11,6 +11,7 @@ mod modpack_settings;
 mod mods;
 mod process_logs;
 mod screenshots;
+mod security;
 mod shaders;
 mod textures;
 mod worlds;

@@ -219,6 +219,20 @@ pub(crate) fn grant_live(instance_id: i64, path: &Path, write: bool) -> SandboxR
     }
 }
 
+/// Takes back a folder the user stopped sharing
+pub(crate) fn revoke(instance_id: i64, path: &Path) -> SandboxResult<()> {
+    let sid = container_sid(instance_id)?;
+    let sid_string = sid.to_string_sid()?;
+    set_entry(
+        path,
+        &sid,
+        0,
+        windows_sys::Win32::Security::Authorization::REVOKE_ACCESS,
+    )?;
+    let _ = std::fs::remove_file(path.join(format!("{MARKER}-{}", short_hash(&sid_string))));
+    Ok(())
+}
+
 pub(crate) fn forget(instance_id: i64) {
     // SAFETY: valid NUL-terminated name
     unsafe { DeleteAppContainerProfile(wide(container_name(instance_id)).as_ptr()) };
@@ -226,6 +240,15 @@ pub(crate) fn forget(instance_id: i64) {
 
 /// Adds an inheritable allow entry for `sid` and lets Windows propagate it
 fn grant(path: &Path, sid: &Sid, access: u32) -> SandboxResult<()> {
+    set_entry(path, sid, access, GRANT_ACCESS)
+}
+
+fn set_entry(
+    path: &Path,
+    sid: &Sid,
+    access: u32,
+    mode: windows_sys::Win32::Security::Authorization::ACCESS_MODE,
+) -> SandboxResult<()> {
     let name = wide(path);
     let mut old: *mut ACL = std::ptr::null_mut();
     let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
@@ -251,7 +274,7 @@ fn grant(path: &Path, sid: &Sid, access: u32) -> SandboxResult<()> {
 
     let entry = EXPLICIT_ACCESS_W {
         grfAccessPermissions: access,
-        grfAccessMode: GRANT_ACCESS,
+        grfAccessMode: mode,
         grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
         Trustee: TRUSTEE_W {
             pMultipleTrustee: std::ptr::null_mut(),

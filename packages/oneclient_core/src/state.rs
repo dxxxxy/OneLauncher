@@ -108,6 +108,7 @@ impl LauncherState {
             security: Arc::default(),
         });
         state.security.load_history().await;
+        crate::security::install_global(Arc::clone(&state.security));
 
         Ok(state)
     }

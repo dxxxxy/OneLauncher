@@ -322,6 +322,7 @@ impl Component for ClusterSettings {
                         "GameArgs",
                         text_row(cluster_id, TextField::GameArgs, &profile, &global),
                     ))
+                    .child(super::security::SecuritySection { cluster_id }.into_element())
                     .child(section_header(t(
                         "oneclient.cluster.settings.section.process",
                     )))

@@ -190,6 +190,16 @@ pub fn grant_live(instance_id: i64, path: &std::path::Path, write: bool) -> Sand
     }
 }
 
+/// Takes back a folder grant. Windows applies it at once; elsewhere the
+/// sandbox is rebuilt from settings at every launch, so nothing is needed
+pub fn revoke_grant(instance_id: i64, path: &std::path::Path) -> SandboxResult<()> {
+    #[cfg(windows)]
+    windows::revoke(instance_id, path)?;
+    #[cfg(not(windows))]
+    let _ = (instance_id, path);
+    Ok(())
+}
+
 /// Drops the per-instance sandbox identity when an instance is deleted
 pub fn forget_instance(instance_id: i64) {
     #[cfg(windows)]

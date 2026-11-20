@@ -25,6 +25,7 @@ mod notifications;
 pub mod platform;
 pub mod protocol;
 pub mod recovery;
+mod security_ui;
 mod routes;
 pub mod shortcut;
 pub mod state;
