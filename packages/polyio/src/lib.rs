@@ -3,6 +3,8 @@ mod error;
 mod file;
 mod hash;
 mod system;
+#[cfg(windows)]
+pub mod win_security;
 
 #[cfg(feature = "testing")]
 pub mod testing;

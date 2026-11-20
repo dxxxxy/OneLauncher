@@ -45,5 +45,9 @@ sha2.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 junction.workspace = true
-windows-sys.workspace = true
+windows-sys = { workspace = true, features = [
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }
 

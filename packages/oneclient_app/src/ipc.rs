@@ -175,6 +175,7 @@ where
 #[cfg(windows)]
 mod imp {
     use super::{BindError, IpcCommand, exchange, handle};
+    use polyio::win_security::SecurityDescriptor;
     use std::time::Duration;
     use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
     use tokio::sync::mpsc::UnboundedSender;
@@ -192,14 +193,24 @@ mod imp {
 
     pub struct Listener {
         server: NamedPipeServer,
+        security: SecurityDescriptor,
+    }
+
+    /// Every pipe instance gets an explicit DACL: this user only, never an
+    /// AppContainer, so a sandboxed game cannot send `LAUNCH` or `STOP`
+    fn create(
+        security: &SecurityDescriptor,
+        options: &ServerOptions,
+    ) -> std::io::Result<NamedPipeServer> {
+        let mut attributes = security.attributes();
+        // SAFETY: the attributes and the descriptor they borrow outlive the call
+        unsafe { options.create_with_security_attributes_raw(ENDPOINT, attributes.as_mut_ptr()) }
     }
 
     pub async fn bind() -> Result<Listener, BindError> {
-        match ServerOptions::new()
-            .first_pipe_instance(true)
-            .create(ENDPOINT)
-        {
-            Ok(server) => Ok(Listener { server }),
+        let security = SecurityDescriptor::current_user_only().map_err(BindError::Io)?;
+        match create(&security, ServerOptions::new().first_pipe_instance(true)) {
+            Ok(server) => Ok(Listener { server, security }),
             Err(err) if err.raw_os_error() == Some(ERROR_ACCESS_DENIED) => Err(BindError::Taken),
             Err(err) => Err(BindError::Io(err)),
         }
@@ -219,14 +230,17 @@ mod imp {
     }
 
     pub async fn serve(listener: Listener, commands: UnboundedSender<IpcCommand>) {
-        let mut server = listener.server;
+        let Listener {
+            mut server,
+            security,
+        } = listener;
 
         loop {
             if server.connect().await.is_err() {
                 return;
             }
 
-            let next = match ServerOptions::new().create(ENDPOINT) {
+            let next = match create(&security, &ServerOptions::new()) {
                 Ok(next) => next,
                 Err(_) => return,
             };
