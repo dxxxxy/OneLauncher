@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 pub use error::LogsError;
 pub use manage::{cluster_output_log, delete_log_at, list_cluster_logs, read_log_at};
 pub use mclogs::{log_exceeds_upload_limit, upload_log_at};
-pub use parse::{censor, censor_username, parse_level};
+pub use parse::{censor, censor_username, is_secret_flag, parse_level};
 
 /// No launcher variant on purpose the launcher's own logs live in the log console
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -130,6 +130,13 @@ mod tests {
             ),
             "[12:00:00] [Client thread/INFO]: (Session ID is [censored])"
         );
+    }
+
+    #[test]
+    fn recognises_secret_flags() {
+        assert!(super::is_secret_flag("--accessToken"));
+        assert!(super::is_secret_flag("--session"));
+        assert!(!super::is_secret_flag("--username"));
     }
 
     #[test]

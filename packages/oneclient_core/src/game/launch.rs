@@ -1061,9 +1061,17 @@ fn command_line(command: &std::process::Command, main_class: &str) -> String {
     }
     out += &shell_quote(&command.get_program().to_string_lossy());
 
+    let mut secret_next = false;
     for arg in command.get_args() {
-        let arg = arg.to_string_lossy();
-        let arg = oneclient_cluster::logs::censor(&arg);
+        let raw = arg.to_string_lossy();
+        let arg = if std::mem::replace(
+            &mut secret_next,
+            oneclient_cluster::logs::is_secret_flag(&raw),
+        ) {
+            std::borrow::Cow::Borrowed("[censored]")
+        } else {
+            oneclient_cluster::logs::censor(&raw)
+        };
         out += if arg.starts_with('-') || arg == main_class {
             CONTINUATION
         } else {
@@ -1209,6 +1217,24 @@ fn stderr_detail(bytes: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_line_censors_a_token_that_is_not_a_jwt() {
+        let mut command = std::process::Command::new("java");
+        command.args([
+            "net.minecraft.client.main.Main",
+            "--accessToken",
+            "plainopaquetoken123",
+            "--version",
+            "1.8.9",
+        ]);
+
+        let line = command_line(&command, "net.minecraft.client.main.Main");
+
+        assert!(!line.contains("plainopaquetoken123"), "{line}");
+        assert!(line.contains("[censored]"), "{line}");
+        assert!(line.contains("1.8.9"), "{line}");
+    }
 
     fn clean() -> Exit {
         Exit::Observed {
