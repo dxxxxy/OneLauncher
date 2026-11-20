@@ -203,6 +203,22 @@ fn container_sid(instance_id: i64) -> SandboxResult<Sid> {
     })
 }
 
+pub(crate) fn grant_live(instance_id: i64, path: &Path, write: bool) -> SandboxResult<()> {
+    let sid = container_sid(instance_id)?;
+    let sid_string = sid.to_string_sid()?;
+    if path.is_file() {
+        grant(path, &sid, if write { MODIFY } else { READ_EXECUTE })
+    } else {
+        grant_once(
+            path,
+            &sid,
+            &sid_string,
+            if write { MODIFY } else { READ_EXECUTE },
+            true,
+        )
+    }
+}
+
 pub(crate) fn forget(instance_id: i64) {
     // SAFETY: valid NUL-terminated name
     unsafe { DeleteAppContainerProfile(wide(container_name(instance_id)).as_ptr()) };

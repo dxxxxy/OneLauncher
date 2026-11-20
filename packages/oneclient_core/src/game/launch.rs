@@ -1,5 +1,5 @@
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -418,6 +418,8 @@ async fn start(
 
     let arg_map = version_info.arguments.clone().unwrap_or_default();
 
+    let protected = protect_launch(state, &cluster, &cwd, &java.absolute_path, &account).await?;
+
     let classpaths = arguments::classpaths(
         &libraries,
         &version_info.libraries,
@@ -439,6 +441,7 @@ async fn start(
         &java.os_arch,
         java.major,
     )?;
+    jvm_args.splice(0..0, protected.jvm_arguments());
 
     let mods_dir = paths::cluster_mods_dir(&cluster.folder_name)?;
     if let Some(arg) = crate::game::mods_folder_argument(
@@ -464,7 +467,8 @@ async fn start(
     let mut mc_args = arguments::minecraft_arguments(
         arg_map.get(&ArgumentType::Game).map(Vec::as_slice),
         version_info.minecraft_arguments.as_deref(),
-        &account.access_token,
+        // the game never holds the real token, only one the broker answers for
+        &protected.game_token,
         &account.username,
         account.id,
         &version.id,
@@ -508,6 +512,7 @@ async fn start(
     }
 
     apply_env(&mut command, &profile);
+    protected.apply_env(&mut command);
 
     command
         .args(jvm_args)
@@ -545,23 +550,28 @@ async fn start(
         Err(err) => Err(err),
     };
 
-    match handles {
-        Ok((out, err)) => {
-            command.stdout(Stdio::from(out)).stderr(Stdio::from(err));
-        }
+    let (out, err) = match handles {
+        Ok((out, err)) => (Some(out), Some(err)),
         Err(err) => {
             tracing::warn!(cluster_id, error = %err, "failed to open game log; discarding output");
-            command.stdout(Stdio::null()).stderr(Stdio::null());
+            (None, None)
         }
-    }
-    command.stdin(Stdio::null());
-    detach(&mut command);
+    };
+    let spec = if protected.sandbox.is_sandboxed() {
+        oneclient_sandbox::SpawnSpec::from_command(command.as_std(), out, err)
+    } else {
+        oneclient_sandbox::SpawnSpec::inheriting(command.as_std(), out, err)
+    };
 
-    let mut child = command.spawn().map_err(|err| match &wrapper {
-        Some(program) => GameError::wrapper_spawn(program, &err),
-        None => GameError::Spawn(err.to_string()),
-    })?;
+    let mut child = protected
+        .sandbox
+        .spawn(spec)
+        .map_err(|err| match &wrapper {
+            Some(program) => GameError::wrapper_spawn(program, &err),
+            None => GameError::Spawn(err.to_string()),
+        })?;
     let pid = child.id();
+    protected.keep(state, cluster_id);
 
     stage(LaunchStage::Running);
     state.games.set_pid(cluster_id, pid);
@@ -625,6 +635,7 @@ async fn start(
             Err(err) => Exit::Failed(err.to_string()),
         };
 
+        state.security.drop_broker(cluster.id);
         finalize_session(
             &state,
             &cluster,
@@ -655,24 +666,17 @@ async fn running_cluster_name(state: &Arc<LauncherState>, cluster_id: i64) -> St
         .map_or_else(|_| format!("Cluster {cluster_id}"), |cluster| cluster.name)
 }
 
-/// Cuts the game loose from the launcher's process group/console so signals
-/// aimed at the launcher (Ctrl-C console close) don't reach the game
-fn detach(command: &mut Command) {
-    #[cfg(unix)]
+/// Asks the game to close. Under bubblewrap the PID we hold is bwrap's, which
+/// doesn't pass signals on, so the whole process group is asked instead
+fn stop_gracefully(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
     {
-        use std::os::unix::process::CommandExt;
-        command.as_std_mut().process_group(0);
+        // SAFETY: plain kill(2) on the group the game was started in
+        if unsafe { libc::kill(-(pid as i32), libc::SIGTERM) } == 0 {
+            return true;
+        }
     }
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        command
-            .as_std_mut()
-            .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-    }
+    crate::game::kill_process(pid)
 }
 
 #[cfg(unix)]
@@ -713,10 +717,10 @@ const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(7);
 /// runs its shutdown hooks, and the kill is only the fallback for a game that
 /// will not go.
 async fn stop_child(
-    child: &mut tokio::process::Child,
+    child: &mut oneclient_sandbox::GameChild,
 ) -> std::io::Result<std::process::ExitStatus> {
     if let Some(pid) = child.id()
-        && crate::game::kill_process(pid)
+        && stop_gracefully(pid)
     {
         match tokio::time::timeout(GRACEFUL_STOP_TIMEOUT, child.wait()).await {
             Ok(status) => return status,
@@ -1309,4 +1313,188 @@ mod jvm_arg_tests {
         assert_eq!(jvm_args_with(Some("-Xss2m"), None), "-Xss2m");
         assert_eq!(jvm_args_with(None, None), "");
     }
+}
+
+/// The sandbox and the broker for one launch
+struct ProtectedLaunch {
+    sandbox: oneclient_sandbox::Prepared,
+    broker: Option<(
+        oneclient_broker::LaunchDescriptor,
+        oneclient_broker::RunningBroker,
+        PathBuf,
+    )>,
+    game_token: String,
+    home: PathBuf,
+    temp: PathBuf,
+}
+
+impl ProtectedLaunch {
+    fn jvm_arguments(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        if let Some((_, running, jar)) = &self.broker {
+            args.extend(oneclient_broker::agent::jvm_arguments(jar, running));
+        }
+        if self.sandbox.is_sandboxed() {
+            let temp = self.temp.display();
+            args.extend([
+                "-Doneclient.sandboxed=true".to_string(),
+                format!("-Djava.io.tmpdir={temp}"),
+                format!("-Djna.tmpdir={temp}"),
+                format!("-Dorg.lwjgl.system.SharedLibraryExtractPath={temp}"),
+                format!("-Duser.home={}", self.home.display()),
+                // hsperfdata would otherwise go to the real temp folder
+                "-XX:-UsePerfData".to_string(),
+            ]);
+        }
+        args
+    }
+
+    fn apply_env(&self, command: &mut Command) {
+        if let Some((descriptor, _, _)) = &self.broker {
+            command.env(oneclient_broker::KEY_ENV, &descriptor.key);
+        }
+        if self.sandbox.is_sandboxed() {
+            let roaming = self.home.join("AppData").join("Roaming");
+            let local = self.home.join("AppData").join("Local");
+            command
+                .env("HOME", &self.home)
+                .env("USERPROFILE", &self.home)
+                .env("APPDATA", roaming)
+                .env("LOCALAPPDATA", local)
+                .env("TMP", &self.temp)
+                .env("TEMP", &self.temp)
+                .env("TMPDIR", &self.temp)
+                .env("XDG_CONFIG_HOME", self.home.join(".config"))
+                .env("XDG_DATA_HOME", self.home.join(".local").join("share"))
+                .env("XDG_CACHE_HOME", self.home.join(".cache"));
+        }
+    }
+
+    /// The broker must outlive this function, and the launcher if need be
+    fn keep(self, state: &Arc<LauncherState>, cluster_id: i64) {
+        state
+            .security
+            .set_protection(cluster_id, self.sandbox.protection.clone());
+        if let Some((_, running, _)) = self.broker {
+            state.security.keep_broker(cluster_id, running);
+        }
+    }
+}
+
+async fn protect_launch(
+    state: &Arc<LauncherState>,
+    cluster: &oneclient_cluster::Cluster,
+    game_dir: &Path,
+    java_path: &str,
+    account: &oneclient_auth::MinecraftAccount,
+) -> LauncherResult<ProtectedLaunch> {
+    use crate::security::{InstanceSecurity, LauncherBrokerHost};
+
+    let settings = InstanceSecurity::load(cluster.id).await;
+    let cluster_dir = cluster.dir()?;
+    let private = cluster_dir.join(".oneclient");
+    let home = private.join("home");
+    let temp = private.join("tmp");
+    let metadata = paths::metadata_dir()?;
+
+    let sandbox = if settings.sandbox {
+        let microphone = match settings.microphone {
+            Some(choice) => choice,
+            None => {
+                crate::security::has_voice_mod(&paths::cluster_mods_dir(&cluster.folder_name)?)
+                    .await
+                    || crate::security::has_voice_mod(&game_dir.join("mods")).await
+            }
+        };
+        let mut extra_read_only: Vec<PathBuf> = settings
+            .grants
+            .iter()
+            .filter(|g| !g.write)
+            .map(|g| g.path.clone())
+            .collect();
+        let extra_read_write = settings
+            .grants
+            .iter()
+            .filter(|g| g.write)
+            .map(|g| g.path.clone())
+            .collect();
+        // a custom Java outside the launcher's own folder
+        let java_root = Path::new(java_path)
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf);
+        if let Some(root) = java_root.filter(|root| !root.starts_with(&metadata)) {
+            extra_read_only.push(root);
+        }
+        let mut read_write = vec![cluster_dir.clone()];
+        if !game_dir.starts_with(&cluster_dir) {
+            read_write.push(game_dir.to_path_buf());
+        }
+        let policy = oneclient_sandbox::SandboxPolicy {
+            instance_id: cluster.id,
+            runtime: vec![metadata.clone()],
+            read_write,
+            extra_read_only,
+            extra_read_write,
+            home: home.clone(),
+            temp: temp.clone(),
+            microphone,
+            localhost: settings.localhost,
+        };
+        oneclient_sandbox::prepare(&policy)
+            .await
+            .map_err(|err| GameError::Sandbox(err.to_string()))?
+    } else {
+        oneclient_sandbox::unsandboxed("The sandbox is turned off for this instance")
+    };
+    tracing::info!(cluster_id = cluster.id, protection = ?sandbox.protection, "game protection");
+
+    let broker = if account.is_microsoft() && !account.access_token.is_empty() {
+        let descriptor = oneclient_broker::LaunchDescriptor::new(
+            cluster.id,
+            account.id,
+            vec![game_dir.to_path_buf(), cluster_dir.clone()],
+            sandbox.app_container_sid.clone(),
+            cfg!(unix).then(|| private.join("broker")),
+        );
+        let host = Arc::new(LauncherBrokerHost {
+            cluster_id: cluster.id,
+            cluster_name: cluster.name.clone(),
+            cluster_dir: cluster_dir.clone(),
+            sandboxed: sandbox.is_sandboxed(),
+            auth: Arc::clone(&state.auth),
+            events: state.services.events.clone(),
+            security: Arc::clone(&state.security),
+        });
+        let running =
+            oneclient_broker::start(&descriptor, host, state.services.requester.http().clone())
+                .map_err(|err| GameError::Broker(err.to_string()))?;
+        let session = crate::security::session_file(cluster.id)?;
+        if let Some(parent) = session.parent() {
+            polyio::create_dir_all(parent).await?;
+        }
+        descriptor
+            .save(&session)
+            .await
+            .map_err(|err| GameError::Broker(err.to_string()))?;
+        let jar = oneclient_broker::agent::install(&metadata.join("agent"))
+            .await
+            .map_err(|err| GameError::Broker(err.to_string()))?;
+        Some((descriptor, running, jar))
+    } else {
+        None
+    };
+
+    let game_token = match &broker {
+        Some((descriptor, _, _)) => descriptor.fake_token.clone(),
+        None => account.access_token.clone(),
+    };
+
+    Ok(ProtectedLaunch {
+        sandbox,
+        broker,
+        game_token,
+        home,
+        temp,
+    })
 }

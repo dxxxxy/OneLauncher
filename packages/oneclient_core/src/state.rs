@@ -39,6 +39,7 @@ pub struct LauncherState {
     pub images: ImageCacheStore,
     pub games: crate::game::GameProcessManager,
     pub discord: DiscordRpc,
+    pub security: Arc<crate::security::SecurityService>,
 }
 
 impl LauncherServices {
@@ -104,7 +105,9 @@ impl LauncherState {
             images: ImageCacheStore::new(),
             games: crate::game::GameProcessManager::new(),
             discord,
+            security: Arc::default(),
         });
+        state.security.load_history().await;
 
         Ok(state)
     }

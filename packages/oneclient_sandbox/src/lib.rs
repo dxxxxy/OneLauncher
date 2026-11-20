@@ -174,6 +174,22 @@ impl Prepared {
     }
 }
 
+/// Gives a running sandboxed game access to one more folder the user picked.
+/// Only Windows can widen a running sandbox; elsewhere this returns `false`
+/// and the grant applies from the next launch
+pub fn grant_live(instance_id: i64, path: &std::path::Path, write: bool) -> SandboxResult<bool> {
+    #[cfg(windows)]
+    {
+        windows::grant_live(instance_id, path, write)?;
+        return Ok(true);
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = (instance_id, path, write);
+        Ok(false)
+    }
+}
+
 /// Drops the per-instance sandbox identity when an instance is deleted
 pub fn forget_instance(instance_id: i64) {
     #[cfg(windows)]

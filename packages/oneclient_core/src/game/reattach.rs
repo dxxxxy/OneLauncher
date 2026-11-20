@@ -155,6 +155,7 @@ async fn readopt(
     state.games.set_stage(cluster_id, LaunchStage::Running);
     state.games.set_pid(cluster_id, Some(pid));
     state.games.set_dir(cluster_id, cwd.clone());
+    crate::security::resume_broker(state, &cluster).await;
     let version_name = state
         .metadata
         .try_lock()
@@ -218,6 +219,7 @@ async fn readopt(
         }
 
         tail.stop().await;
+        state.security.drop_broker(cluster.id);
 
         finalize_session(
             &state,

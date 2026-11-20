@@ -46,6 +46,25 @@ impl SpawnSpec {
         }
     }
 
+    /// For unsandboxed launches: the launcher's whole environment, as games
+    /// always got it, with the command's changes on top
+    pub fn inheriting(
+        command: &std::process::Command,
+        stdout: Option<std::fs::File>,
+        stderr: Option<std::fs::File>,
+    ) -> Self {
+        let mut spec = Self::from_command(command, stdout, stderr);
+        let mut env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+        for (key, value) in command.get_envs() {
+            env.retain(|(k, _)| !crate::env::same_key(k, key));
+            if let Some(value) = value {
+                env.push((key.to_os_string(), value.to_os_string()));
+            }
+        }
+        spec.env = env;
+        spec
+    }
+
     pub fn set_env(&mut self, key: &str, value: impl Into<OsString>) {
         self.env
             .retain(|(k, _)| !crate::env::same_key(k, std::ffi::OsStr::new(key)));

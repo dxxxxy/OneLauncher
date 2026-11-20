@@ -63,6 +63,14 @@ pub enum GameError {
     Spawn(String),
 
     #[error(
+        "OneClient could not set up the game sandbox: {0}. You can turn the sandbox off for this instance in its Security settings, but mods will then be able to read your files."
+    )]
+    Sandbox(String),
+
+    #[error("OneClient could not start the account protection for this game: {0}")]
+    Broker(String),
+
+    #[error(
         "the wrapper command '{program}' could not be started: {reason}. Check the Wrapper Command setting."
     )]
     WrapperSpawn { program: String, reason: String },
