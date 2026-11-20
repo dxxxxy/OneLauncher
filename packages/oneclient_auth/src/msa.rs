@@ -735,7 +735,7 @@ struct XblUserToken {
     token: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct XboxTokenResponse {
     #[serde(default)]

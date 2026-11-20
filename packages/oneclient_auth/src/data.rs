@@ -9,7 +9,7 @@ pub enum AccountKind {
     Offline,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MinecraftAccount {
     pub id: Uuid,
     pub username: String,
@@ -22,6 +22,29 @@ pub struct MinecraftAccount {
     /// launch until the user signs in to it again
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub signed_out: bool,
+}
+
+// tokens must never reach logs or panic messages through `{:?}`
+impl std::fmt::Debug for MinecraftAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn redacted(token: &str) -> &'static str {
+            if token.is_empty() {
+                "<empty>"
+            } else {
+                "<redacted>"
+            }
+        }
+
+        f.debug_struct("MinecraftAccount")
+            .field("id", &self.id)
+            .field("username", &self.username)
+            .field("access_token", &redacted(&self.access_token))
+            .field("refresh_token", &redacted(&self.refresh_token))
+            .field("expires", &self.expires)
+            .field("kind", &self.kind)
+            .field("signed_out", &self.signed_out)
+            .finish()
+    }
 }
 
 fn default_account_kind() -> AccountKind {
@@ -84,5 +107,29 @@ impl MicrosoftLoginSession {
 
     pub fn verification_uri(&self) -> &str {
         &self.device.verification_uri
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_output_hides_tokens() {
+        let account = MinecraftAccount {
+            id: Uuid::nil(),
+            username: "Steve".to_string(),
+            access_token: "secret-access".to_string(),
+            refresh_token: "secret-refresh".to_string(),
+            expires: Utc::now(),
+            kind: AccountKind::Microsoft,
+            signed_out: false,
+        };
+
+        let printed = format!("{account:?}");
+
+        assert!(!printed.contains("secret-access"), "{printed}");
+        assert!(!printed.contains("secret-refresh"), "{printed}");
+        assert!(printed.contains("Steve"), "{printed}");
     }
 }
