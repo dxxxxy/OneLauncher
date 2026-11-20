@@ -115,6 +115,8 @@ fn detach(command: &mut std::process::Command) {
 }
 
 /// The running game, whichever way it was started
+// one per running game; boxing the tokio child buys nothing
+#[allow(clippy::large_enum_variant)]
 pub enum GameChild {
     Tokio(tokio::process::Child),
     #[cfg(windows)]
