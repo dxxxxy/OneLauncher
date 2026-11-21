@@ -8,6 +8,8 @@ import java.io.DataOutputStream;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
+import java.io.RandomAccessFile;
 import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.List;
@@ -144,10 +146,11 @@ final class Bridge {
         // about 2s in all: long enough for the launcher to recreate its pipes,
         // short enough that a closed launcher fails a join quickly
         for (int attempt = 0; attempt < 10; attempt++) {
+            DataOutputStream o = null;
             try {
                 // up first: on Unix a FIFO's write end only opens once the
                 // launcher holds the read end, which it always does
-                DataOutputStream o = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(up)));
+                o = new DataOutputStream(new BufferedOutputStream(openUp()));
                 o.write(frame(0, HELLO, new Body() {
                     public void write(DataOutputStream d) throws IOException {
                         writeString(d, key);
@@ -167,6 +170,14 @@ final class Bridge {
                 return o;
             } catch (IOException e) {
                 last = e;
+                // a half-open attempt would hold the launcher's only pipe instance
+                if (o != null) {
+                    try {
+                        o.close();
+                    } catch (IOException ignored) {
+                        // already broken
+                    }
+                }
                 try {
                     Thread.sleep(100L + attempt * 20L);
                 } catch (InterruptedException ie) {
@@ -176,6 +187,31 @@ final class Bridge {
             }
         }
         throw last != null ? last : new IOException("could not reach OneClient");
+    }
+
+    /**
+     * JetBrains Runtime's FileOutputStream reads a file's DOS attributes
+     * before opening it. On a named pipe that read is itself a connection, so
+     * it takes the pipe's only instance and the real open then fails with
+     * "All pipe instances are busy". RandomAccessFile opens directly; the
+     * launcher makes the up pipe duplex so read-write access is allowed.
+     */
+    private OutputStream openUp() throws IOException {
+        if (!up.startsWith("\\\\.\\pipe\\")) return new FileOutputStream(up);
+        final RandomAccessFile pipe = new RandomAccessFile(up, "rw");
+        return new OutputStream() {
+            public void write(int b) throws IOException {
+                pipe.write(b);
+            }
+
+            public void write(byte[] b, int off, int len) throws IOException {
+                pipe.write(b, off, len);
+            }
+
+            public void close() throws IOException {
+                pipe.close();
+            }
+        };
     }
 
     private void startReader(final DataInputStream in) {

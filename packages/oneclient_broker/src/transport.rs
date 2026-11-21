@@ -69,6 +69,9 @@ mod windows {
             &self.endpoint
         }
 
+        /// The up pipe is duplex although only the game writes to it: the agent
+        /// opens it read-write, since JetBrains Runtime's write-only open
+        /// probes the pipe first and uses up its only instance
         fn create(&self, name: &str, inbound: bool) -> io::Result<NamedPipeServer> {
             let mut options = ServerOptions::new();
             options
@@ -76,7 +79,7 @@ mod windows {
                 .reject_remote_clients(true)
                 .max_instances(1)
                 .access_inbound(inbound)
-                .access_outbound(!inbound);
+                .access_outbound(true);
             let mut attributes = self.security.attributes();
             // SAFETY: attributes and the descriptor they borrow outlive the call
             unsafe { options.create_with_security_attributes_raw(name, attributes.as_mut_ptr()) }
