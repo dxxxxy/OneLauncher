@@ -418,7 +418,7 @@ async fn start(
 
     let arg_map = version_info.arguments.clone().unwrap_or_default();
 
-    let protected = protect_launch(state, &cluster, &cwd, &java.absolute_path, &account).await?;
+    let protected = protect_launch(state, &cluster, &cwd, &java.absolute_path, account).await?;
 
     let classpaths = arguments::classpaths(
         &libraries,
