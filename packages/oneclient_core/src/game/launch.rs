@@ -1687,6 +1687,7 @@ async fn protect_launch(
             discord_socket: unix_discord.as_ref().map(|r| r.path().to_path_buf()),
             #[cfg(not(unix))]
             discord_socket: None,
+            offline: false,
         };
         oneclient_sandbox::prepare(&policy)
             .await

@@ -358,6 +358,81 @@ async fn install_cluster(
     Ok(())
 }
 
+/// The sandbox the Forge installer's processors run in, kept apart from
+/// every instance's. They come from the loader's installer, not from mods,
+/// but still only get what they need: the launcher's files to read, the
+/// libraries and this version's folder to write, and no network
+const INSTALLER_SANDBOX_ID: i64 = -1;
+
+fn processor_policy(
+    java: &JavaRuntime,
+    version_id: &str,
+) -> LauncherResult<oneclient_sandbox::SandboxPolicy> {
+    let metadata = paths::metadata_dir()?;
+    let scratch = crate::security::security_dir()?.join("installer");
+    let mut runtime = vec![metadata.clone()];
+    // a custom Java outside the launcher's own folder
+    if let Some(root) = std::path::Path::new(&java.absolute_path)
+        .parent()
+        .and_then(std::path::Path::parent)
+        .filter(|root| !root.starts_with(&metadata))
+    {
+        runtime.push(root.to_path_buf());
+    }
+    Ok(oneclient_sandbox::SandboxPolicy {
+        instance_id: INSTALLER_SANDBOX_ID,
+        runtime,
+        read_write: vec![
+            paths::libraries_dir()?,
+            paths::versions_dir()?.join(version_id),
+        ],
+        home: scratch.join("home"),
+        temp: scratch.join("tmp"),
+        offline: true,
+        ..Default::default()
+    })
+}
+
+/// The prepared sandbox and its temp folder, or `None` where there is no
+/// sandbox to run in (the processors then run as before)
+async fn processor_sandbox(
+    java: &JavaRuntime,
+    version_id: &str,
+) -> Option<(oneclient_sandbox::Prepared, std::path::PathBuf)> {
+    let policy = processor_policy(java, version_id)
+        .inspect_err(|err| tracing::warn!("no sandbox for the Forge installer: {err}"))
+        .ok()?;
+    match oneclient_sandbox::prepare(&policy).await {
+        Ok(prepared) if prepared.is_sandboxed() => Some((prepared, policy.temp)),
+        Ok(_) => None,
+        Err(err) => {
+            tracing::warn!("no sandbox for the Forge installer: {err}");
+            None
+        }
+    }
+}
+
+/// Whether the processor succeeded, and what it printed
+async fn run_sandboxed(
+    sandbox: &oneclient_sandbox::Prepared,
+    temp: &std::path::Path,
+    command: &Command,
+) -> LauncherResult<(bool, String)> {
+    let log = temp.join(format!("processor-{}.log", uuid::Uuid::new_v4().simple()));
+    let file = std::fs::File::create(&log)?;
+    let spec = oneclient_sandbox::SpawnSpec::from_command(
+        command.as_std(),
+        Some(file.try_clone()?),
+        Some(file),
+    );
+    let status = sandbox.spawn(spec)?.wait().await?;
+    let output = tokio::fs::read(&log).await.unwrap_or_default();
+    let _ = tokio::fs::remove_file(&log).await;
+    // the end of the output says what went wrong
+    let tail = &output[output.len().saturating_sub(16 * 1024)..];
+    Ok((status.success(), String::from_utf8_lossy(tail).into_owned()))
+}
+
 #[tracing::instrument(level = "debug", skip(cluster, version_info, java), fields(cluster_id = cluster.id))]
 async fn run_forge_processors(
     cluster: &Cluster,
@@ -410,6 +485,14 @@ async fn run_forge_processors(
             server => "";
     }
 
+    let sandbox = processor_sandbox(java, &version_info.id).await;
+    if sandbox.is_none() {
+        tracing::warn!(
+            "running the Forge installer's steps for {} without the sandbox",
+            version_info.id
+        );
+    }
+
     let total = processors.len();
     for (index, processor) in processors.iter().enumerate() {
         if let Some(sides) = &processor.sides
@@ -439,13 +522,18 @@ async fn run_forge_processors(
         oneclient_common::process::no_window(command.as_std_mut());
         oneclient_common::process::strip_appimage_env(command.as_std_mut());
 
-        let output = command.output().await?;
-
-        if !output.status.success() {
-            return Err(GameError::ProcessorFailed(
-                String::from_utf8_lossy(&output.stderr).into_owned(),
-            )
-            .into());
+        let (success, stderr) = match &sandbox {
+            Some((sandbox, temp)) => run_sandboxed(sandbox, temp, &command).await?,
+            None => {
+                let output = command.output().await?;
+                (
+                    output.status.success(),
+                    String::from_utf8_lossy(&output.stderr).into_owned(),
+                )
+            }
+        };
+        if !success {
+            return Err(GameError::ProcessorFailed(stderr).into());
         }
 
         tracing::debug!(

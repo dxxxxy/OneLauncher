@@ -107,3 +107,50 @@ async fn the_game_only_reaches_what_it_was_granted() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// Installer processors run offline: the same program reaches the web from
+/// a normal sandbox and not from an offline one
+#[tokio::test(flavor = "multi_thread")]
+async fn offline_sandboxes_have_no_network() {
+    let curl = PathBuf::from(r"C:\Windows\System32\curl.exe");
+    if !curl.is_file() {
+        eprintln!("skipping: no curl.exe");
+        return;
+    }
+    let root = scratch();
+    let fetch = |offline: bool| {
+        let root = root.clone();
+        let curl = curl.clone();
+        async move {
+            let dir = root.join(if offline { "offline" } else { "online" });
+            std::fs::create_dir_all(&dir).unwrap();
+            let instance_id =
+                9_100_000 + i64::from(std::process::id() % 100_000) * 2 + i64::from(offline);
+            let policy = SandboxPolicy {
+                instance_id,
+                read_write: vec![dir.clone()],
+                home: dir.join("home"),
+                temp: dir.join("tmp"),
+                offline,
+                ..Default::default()
+            };
+            let prepared = oneclient_sandbox::prepare(&policy).await.unwrap();
+            let out = std::fs::File::create(dir.join("out.txt")).unwrap();
+            let mut command = std::process::Command::new(&curl);
+            command
+                .args(["-sS", "-o", "NUL", "-m", "10", "https://example.com/"])
+                .current_dir(&dir);
+            let spec = SpawnSpec::from_command(&command, Some(out.try_clone().unwrap()), Some(out));
+            let status = prepared.spawn(spec).unwrap().wait().await.unwrap();
+            oneclient_sandbox::forget_instance(instance_id);
+            status.success()
+        }
+    };
+    if !fetch(false).await {
+        eprintln!("skipping: no network here");
+        let _ = std::fs::remove_dir_all(root);
+        return;
+    }
+    assert!(!fetch(true).await, "an offline sandbox reached the network");
+    let _ = std::fs::remove_dir_all(root);
+}

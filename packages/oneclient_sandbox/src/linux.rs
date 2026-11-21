@@ -230,6 +230,9 @@ impl Plan {
                 &mut args,
                 &["--unshare-ipc", "--unshare-cgroup-try", "--cap-drop", "ALL"],
             );
+            if policy.offline {
+                push(&mut args, &["--unshare-net"]);
+            }
             push(&mut args, &["--"]);
 
             return Ok(Self::Bwrap {

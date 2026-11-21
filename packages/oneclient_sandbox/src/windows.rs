@@ -480,12 +480,13 @@ impl Container {
             grant_once(dir, &sid, &sid_string, MODIFY, true)?;
         }
 
-        let mut capabilities = vec![
-            Sid::from_string(INTERNET_CLIENT)?,
-            Sid::from_string(INTERNET_CLIENT_SERVER)?,
-            Sid::from_string(PRIVATE_NETWORK)?,
-            runtime,
-        ];
+        // an AppContainer without the network capabilities has no network
+        let mut capabilities = vec![runtime];
+        if !policy.offline {
+            capabilities.push(Sid::from_string(INTERNET_CLIENT)?);
+            capabilities.push(Sid::from_string(INTERNET_CLIENT_SERVER)?);
+            capabilities.push(Sid::from_string(PRIVATE_NETWORK)?);
+        }
         if policy.microphone {
             capabilities.push(Sid::capability("microphone")?);
         }

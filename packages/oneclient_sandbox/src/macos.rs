@@ -59,6 +59,10 @@ pub(crate) fn profile(policy: &SandboxPolicy, home: &Path) -> String {
             quote(relay)
         ));
     }
+    if policy.offline {
+        p.push_str("(deny network*)
+");
+    }
     // other apps: no scripting them, no asking the keychain
     p.push_str("(deny appleevent-send)\n");
     p.push_str("(deny mach-lookup (global-name \"com.apple.SecurityServer\"))\n");

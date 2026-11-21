@@ -65,6 +65,9 @@ pub struct SandboxPolicy {
     /// Unix: the launcher's Discord relay socket, shown to the game where
     /// Discord's own would be. Discord's real socket stays out of reach
     pub discord_socket: Option<PathBuf>,
+    /// No network at all (installer processors, which only transform jars).
+    /// Landlock can't take the network away, so there it stays reachable
+    pub offline: bool,
 }
 
 /// How well the sandbox protects this launch, for the badge in the UI
