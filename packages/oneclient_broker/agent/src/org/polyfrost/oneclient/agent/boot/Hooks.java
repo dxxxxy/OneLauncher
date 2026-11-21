@@ -431,7 +431,7 @@ public final class Hooks {
     }
 
     /** Asks the launcher to reveal or trash an instance file; whether it did */
-    private static boolean fileRequest(final byte kind, final String path) {
+    static boolean fileRequest(final byte kind, final String path) {
         final String caller = Bridge.caller();
         try {
             Bridge.Reply reply = Bridge.INSTANCE.call(kind, new Bridge.Body() {
@@ -599,7 +599,7 @@ public final class Hooks {
 
     // ---- pickers
 
-    private static final byte OPEN_FILE = 0, OPEN_FOLDER = 1, SAVE_FILE = 2;
+    static final byte OPEN_FILE = 0, OPEN_FOLDER = 1, SAVE_FILE = 2;
 
     private static String pick(final byte mode, final String title) {
         return pick(mode, title, java.util.Collections.<String>emptyList());

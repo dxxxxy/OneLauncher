@@ -1,6 +1,5 @@
 package org.polyfrost.oneclient.agent.boot;
 
-import java.io.DataOutputStream;
 import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.util.LinkedHashMap;
@@ -35,16 +34,8 @@ final class PolyPlus {
 
     /** LauncherAccountStore#load: the user's accounts from the launcher, no real tokens */
     static Object load() throws Exception {
-        Bridge.Reply reply = Bridge.INSTANCE.call(Bridge.ACCOUNTS, new Bridge.Body() {
-            public void write(DataOutputStream out) throws IOException {
-                Bridge.writeString(out, "polyplus");
-            }
-        }, 15000);
-        String error = reply.error();
-        if (error != null) throw new IOException(error);
-        if (reply.kind != Bridge.ACCOUNTS_REPLY) throw new IOException("unexpected reply " + reply.kind);
-        String active = Bridge.readString(reply.body);
-        int count = reply.body.readUnsignedShort();
+        String[][] accounts = SandboxApi.accounts();
+        String active = accounts[0][0];
 
         Class<?> stored = Hooks.libraryClass(STORE, STORE + "$StoredAccount");
         Class<?> credentials = Hooks.libraryClass(STORE, STORE + "$CredentialsStore");
@@ -52,24 +43,17 @@ final class PolyPlus {
                 String.class, String.class);
         String token = fakeToken();
         Map<String, Object> users = new LinkedHashMap<String, Object>();
-        for (int i = 0; i < count; i++) {
-            String id = Bridge.readString(reply.body);
-            String name = Bridge.readString(reply.body);
-            users.put(id, account.newInstance(id, name, token, "", NEVER, "microsoft"));
+        for (int i = 1; i < accounts.length; i++) {
+            String id = accounts[i][0];
+            users.put(id, account.newInstance(id, accounts[i][1], token, "", NEVER, "microsoft"));
         }
         return credentials.getConstructor(Map.class, String.class).newInstance(users, active);
     }
 
     /** AccountSwitch#apply: the launcher remaps the session first; false if it refuses */
     static boolean switchTo(Object storedAccount) throws Exception {
-        final String id = (String) storedAccount.getClass().getMethod("getId").invoke(storedAccount);
-        Bridge.Reply reply = Bridge.INSTANCE.call(Bridge.SWITCH_ACCOUNT, new Bridge.Body() {
-            public void write(DataOutputStream out) throws IOException {
-                Bridge.writeString(out, id);
-                Bridge.writeString(out, "polyplus");
-            }
-        }, 30000);
-        String error = reply.error();
+        String id = (String) storedAccount.getClass().getMethod("getId").invoke(storedAccount);
+        String error = SandboxApi.switchAccount(id);
         if (error != null) {
             Main.log("OneClient did not switch accounts: " + error);
             return false;
@@ -80,11 +64,7 @@ final class PolyPlus {
     /** MicrosoftAuth sign-in from the game: the launcher's own flow instead */
     static IllegalStateException addAccount() {
         try {
-            Bridge.INSTANCE.call(Bridge.ADD_ACCOUNT, new Bridge.Body() {
-                public void write(DataOutputStream out) throws IOException {
-                    Bridge.writeString(out, "polyplus");
-                }
-            }, 15000);
+            SandboxApi.addAccount();
         } catch (IOException e) {
             Main.log("could not reach OneClient to add an account: " + e.getMessage());
         }

@@ -213,6 +213,18 @@ public class Probe {
         watcher.getMethod("tick").invoke(screen);
         watcher.getMethod("onClose").invoke(screen);
 
+        // the public API, by reflection as mods use it
+        Class<?> api = Class.forName("org.polyfrost.oneclient.agent.api.OneClientSandbox");
+        String[][] listed = (String[][]) api.getMethod("accounts").invoke(null);
+        System.out.println("api=" + api.getMethod("isSandboxed").invoke(null)
+            + "," + api.getMethod("isBrokered").invoke(null)
+            + "," + listed.length + "," + listed[1][1]
+            + "," + api.getMethod("activeAccount").invoke(null)
+            + "," + api.getMethod("pickFile", String.class, String.class, String[].class)
+                .invoke(null, "open", "Skin", new String[] {"Images|png"})
+            + "," + api.getMethod("trash", String.class).invoke(null, old.toAbsolutePath().toString())
+            + "," + api.getMethod("trash", String.class).invoke(null, System.getProperty("java.home")));
+
         // jagrosh-style Discord IPC: the pipe opened as a file
         if (System.getProperty("os.name").startsWith("Windows")) {
             java.io.RandomAccessFile pipe = new java.io.RandomAccessFile("\\\\?\\pipe\\discord-ipc-0", "rw");
@@ -321,6 +333,8 @@ async fn the_agent_routes_account_requests_through_the_broker() {
         "trashed=true",
         "revealed=0",
         "usable=true",
+        // switched to Alt above; the JDK isn't inside the instance
+        "api=true,true,2,Alt,00000000-0000-0000-0000-000000000002,picked.png,true,false",
     ];
     if cfg!(windows) {
         expected.push("discord=k");
@@ -368,7 +382,10 @@ async fn the_agent_routes_account_requests_through_the_broker() {
         &[Uuid::from_u128(2)]
     );
     let old = std::fs::canonicalize(&packs).unwrap().join("old.zip");
-    assert_eq!(host.trashed.lock().unwrap().as_slice(), &[old.clone()]);
+    assert_eq!(
+        host.trashed.lock().unwrap().as_slice(),
+        &[old.clone(), old.clone()]
+    );
     assert_eq!(host.revealed.lock().unwrap().as_slice(), &[old]);
     // one watch for the screen however often it ticks, stopped on close
     assert_eq!(
