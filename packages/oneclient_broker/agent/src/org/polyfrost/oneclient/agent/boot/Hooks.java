@@ -221,6 +221,79 @@ public final class Hooks {
         }
     }
 
+    // ---- LWJGL 3 fullscreen
+
+    /**
+     * The same limit for 26.1+, which goes through SDL: with no mode, SDL
+     * makes the window fullscreen at the desktop mode, a borderless window
+     * over the whole screen, instead of failing to switch.
+     */
+    public static Object sdlFullscreenMode(Object mode) {
+        return sandboxed ? null : mode;
+    }
+
+    private static final int GLFW_REFRESH_RATE = 0x2100F;
+    private static final ThreadLocal<Boolean> inGlfw = new ThreadLocal<Boolean>();
+
+    /** The monitor's current mode as {width, height, refresh rate}, or null. */
+    private static int[] currentMode(Class<?> glfw, long monitor) throws Exception {
+        Object mode = glfw.getMethod("glfwGetVideoMode", long.class).invoke(null, Long.valueOf(monitor));
+        if (mode == null) return null;
+        Class<?> c = mode.getClass();
+        return new int[] {
+            ((Integer) c.getMethod("width").invoke(mode)).intValue(),
+            ((Integer) c.getMethod("height").invoke(mode)).intValue(),
+            ((Integer) c.getMethod("refreshRate").invoke(mode)).intValue(),
+        };
+    }
+
+    /**
+     * GLFW (1.13 to 1.21) switches the display mode when a fullscreen window
+     * asks for another resolution, which the sandbox can't. At the monitor's
+     * current mode GLFW skips the switch and just covers the monitor, so
+     * fullscreen windows are made at that mode instead.
+     */
+    public static Object glfwCreateWindow(int width, int height, long title, long monitor, long share)
+            throws Throwable {
+        if (!sandboxed || monitor == 0L || inGlfw.get() != null) return PASS;
+        Class<?> glfw = libraryClass("org.lwjgl.glfw.GLFW", "org.lwjgl.glfw.GLFW");
+        int[] mode = currentMode(glfw, monitor);
+        if (mode == null || (mode[0] == width && mode[1] == height)) return PASS;
+        glfw.getMethod("glfwWindowHint", int.class, int.class)
+                .invoke(null, Integer.valueOf(GLFW_REFRESH_RATE), Integer.valueOf(mode[2]));
+        inGlfw.set(Boolean.TRUE);
+        try {
+            return glfw.getMethod("nglfwCreateWindow", int.class, int.class, long.class, long.class, long.class)
+                    .invoke(null, Integer.valueOf(mode[0]), Integer.valueOf(mode[1]), Long.valueOf(title),
+                            Long.valueOf(monitor), Long.valueOf(share));
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            throw e.getCause();
+        } finally {
+            inGlfw.remove();
+        }
+    }
+
+    /** Switching an existing window to fullscreen, the same way. */
+    public static Object glfwSetWindowMonitor(long window, long monitor, int x, int y, int width, int height,
+            int refresh) throws Throwable {
+        if (!sandboxed || monitor == 0L || inGlfw.get() != null) return PASS;
+        Class<?> glfw = libraryClass("org.lwjgl.glfw.GLFW", "org.lwjgl.glfw.GLFW");
+        int[] mode = currentMode(glfw, monitor);
+        if (mode == null || (mode[0] == width && mode[1] == height && mode[2] == refresh)) return PASS;
+        inGlfw.set(Boolean.TRUE);
+        try {
+            glfw.getMethod("glfwSetWindowMonitor", long.class, long.class, int.class, int.class, int.class,
+                    int.class, int.class).invoke(null, Long.valueOf(window), Long.valueOf(monitor),
+                    Integer.valueOf(x), Integer.valueOf(y), Integer.valueOf(mode[0]), Integer.valueOf(mode[1]),
+                    Integer.valueOf(mode[2]));
+            return Boolean.TRUE; // any non-PASS value: void
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            throw e.getCause();
+        } finally {
+            inGlfw.remove();
+        }
+    }
+
     // ---- java.net.http (Java 11+)
 
     private static volatile HttpRelay modern;

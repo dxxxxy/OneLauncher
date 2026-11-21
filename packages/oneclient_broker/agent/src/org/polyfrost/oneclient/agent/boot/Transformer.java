@@ -43,6 +43,16 @@ final class Transformer implements ClassFileTransformer {
     private static final List<Target> SDL_MISC = Arrays.asList(
             new Target("SDL_OpenURL", "(Ljava/lang/CharSequence;)Z", false, 1, "sdlOpenUrl", Kind.INT, null));
 
+    /** Exclusive fullscreen on 26.1+: the mode argument becomes null (desktop mode) */
+    private static final List<Target> SDL_VIDEO = Arrays.asList(
+            new Target("SDL_SetWindowFullscreenMode", "(JLorg/lwjgl/sdl/SDL_DisplayMode;)Z", false, 2,
+                    "sdlFullscreenMode", Kind.REWRITE, "org/lwjgl/sdl/SDL_DisplayMode"));
+
+    /** Exclusive fullscreen before 26.1: always at the monitor's current mode */
+    private static final List<Target> GLFW = Arrays.asList(
+            new Target("nglfwCreateWindow", "(IIJJJ)J", false, 0, "glfwCreateWindow", Kind.TYPED, null),
+            new Target("glfwSetWindowMonitor", "(JJIIIII)V", false, 0, "glfwSetWindowMonitor", Kind.TYPED, null));
+
     private static final List<Target> RANDOM_ACCESS_FILE = Arrays.asList(
             new Target("<init>", "(Ljava/io/File;Ljava/lang/String;)V", false, 1, "discordPipe", Kind.REWRITE,
                     "java/io/File"),
@@ -117,6 +127,8 @@ final class Transformer implements ClassFileTransformer {
             else if (name.equals("javax/swing/JFileChooser")) targets = CHOOSER;
             else if (name.equals("org/lwjgl/util/tinyfd/TinyFileDialogs")) targets = TINYFD;
             else if (name.equals("org/lwjgl/sdl/SDLMisc")) targets = SDL_MISC;
+            else if (name.equals("org/lwjgl/sdl/SDLVideo")) targets = SDL_VIDEO;
+            else if (name.equals("org/lwjgl/glfw/GLFW")) targets = GLFW;
             else return null;
 
             byte[] patched = Patcher.patch(bytes, targets);
