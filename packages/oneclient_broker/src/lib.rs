@@ -13,6 +13,7 @@
 
 pub mod activity;
 pub mod agent;
+pub mod discord;
 pub mod limiter;
 pub mod policy;
 pub mod protocol;
@@ -28,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use activity::{Activity, ActivityKind};
+pub use discord::DiscordRelay;
 pub use protocol::PickMode;
 pub use session::{BoxFuture, BrokerHost, OpenTarget, validate_open};
 use session::{SessionConfig, Shared};

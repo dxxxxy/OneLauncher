@@ -83,6 +83,10 @@ fn describe(activity: &Activity) -> String {
             "oneclient.cluster.security.activity.sensitive",
             &[caller, path],
         ),
+        ActivityKind::DiscordDenied { command } => tf(
+            "oneclient.cluster.security.activity.discord_denied",
+            &[command],
+        ),
     }
 }
 

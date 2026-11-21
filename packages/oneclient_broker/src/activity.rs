@@ -65,6 +65,11 @@ pub enum ActivityKind {
         path: Option<String>,
         caller: String,
     },
+    /// The game asked Discord for more than rich presence (signing in,
+    /// reading servers or messages); the relay refused
+    DiscordDenied {
+        command: String,
+    },
     /// The game touched a file the sandbox keeps away from mods
     SensitiveAccess {
         path: String,
