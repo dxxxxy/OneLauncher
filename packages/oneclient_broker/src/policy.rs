@@ -126,9 +126,7 @@ pub fn decide(method: &str, url: &Url) -> Decision {
         "authserver.mojang.com" => alarm("a mod tried to sign in to or out of your account"),
         "pc.realms.minecraft.net"
         | "java.frontendlegacy.realms.minecraft-services.net"
-        | "java.frontend.realms.minecraft-services.net" => {
-            Decision::Allow(Plain(RealmsCookie))
-        }
+        | "java.frontend.realms.minecraft-services.net" => Decision::Allow(Plain(RealmsCookie)),
         _ => deny("not an account host"),
     }
 }

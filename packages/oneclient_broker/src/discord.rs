@@ -547,8 +547,7 @@ mod tests {
             fn open(&self, _: crate::OpenTarget) {}
             fn pick(
                 &self,
-                _: crate::PickMode,
-                _: String,
+                _: crate::PickRequest,
             ) -> crate::BoxFuture<'_, Option<std::path::PathBuf>> {
                 Box::pin(async { None })
             }

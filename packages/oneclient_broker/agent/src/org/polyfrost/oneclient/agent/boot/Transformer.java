@@ -39,6 +39,18 @@ final class Transformer implements ClassFileTransformer {
             new Target("tinyfd_selectFolderDialog", ")Ljava/lang/String;", true, 1, "tinyFolder", Kind.OBJECT,
                     "java/lang/String"));
 
+    /** 26.1+ file dialogs (OneConfig, Flashback, waypoint mods): asynchronous, answered by callback */
+    private static final List<Target> SDL_DIALOG = Arrays.asList(
+            new Target("nSDL_ShowOpenFileDialog", "(JJJJIJZ)V", false, 0, "sdlOpenFileDialog", Kind.TYPED, null),
+            new Target("nSDL_ShowSaveFileDialog", "(JJJJIJ)V", false, 0, "sdlSaveFileDialog", Kind.TYPED, null),
+            new Target("nSDL_ShowOpenFolderDialog", "(JJJJZ)V", false, 0, "sdlOpenFolderDialog", Kind.TYPED, null),
+            new Target("nSDL_ShowFileDialogWithProperties", "(IJJI)V", false, 0, "sdlFileDialogWithProperties",
+                    Kind.TYPED, null));
+
+    /** AWT's FileDialog: Dialog.setVisible(true) and the old show() both end here */
+    private static final List<Target> AWT_DIALOG = Arrays.asList(
+            new Target("show", "()V", false, 1, "dialogShow", Kind.VOID_BOOL, null));
+
     /** Returns a boolean, which the JVM treats as an int */
     private static final List<Target> SDL_MISC = Arrays.asList(
             new Target("SDL_OpenURL", "(Ljava/lang/CharSequence;)Z", false, 1, "sdlOpenUrl", Kind.INT, null));
@@ -128,6 +140,8 @@ final class Transformer implements ClassFileTransformer {
             else if (name.equals("org/lwjgl/util/tinyfd/TinyFileDialogs")) targets = TINYFD;
             else if (name.equals("org/lwjgl/sdl/SDLMisc")) targets = SDL_MISC;
             else if (name.equals("org/lwjgl/sdl/SDLVideo")) targets = SDL_VIDEO;
+            else if (name.equals("org/lwjgl/sdl/SDLDialog")) targets = SDL_DIALOG;
+            else if (name.equals("java/awt/Dialog")) targets = AWT_DIALOG;
             else if (name.equals("org/lwjgl/glfw/GLFW")) targets = GLFW;
             else return null;
 

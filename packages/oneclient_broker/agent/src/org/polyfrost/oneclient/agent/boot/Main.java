@@ -33,7 +33,7 @@ public final class Main {
         inst.addTransformer(new Transformer(), true);
         if (Hooks.sandboxed) {
             retransformLoaded(inst, "java.lang.ProcessBuilder", "java.awt.Desktop", "javax.swing.JFileChooser",
-                    "java.io.RandomAccessFile", "java.io.File", "sun.nio.fs.WindowsPath",
+                    "java.io.RandomAccessFile", "java.io.File", "sun.nio.fs.WindowsPath", "java.awt.Dialog",
                     "sun.nio.fs.WindowsFileSystemProvider", "java.io.WinNTFileSystem");
             Transformer.startModuleFixer();
         }
@@ -67,13 +67,16 @@ public final class Main {
             Map<String, Set<Object>> exports = new HashMap<String, Set<Object>>();
             exports.put("sun.net.www.protocol.http", Collections.singleton(ours));
             exports.put("sun.net.www.protocol.https", Collections.singleton(ours));
-            redefine(inst, base, ours, exports);
+            redefine(inst, base, ours, exports, Collections.<String, Set<Object>>emptyMap());
             // java.net.http belongs to the platform loader, not the boot one
             ClassLoader platform = ClassLoader.getSystemClassLoader();
             for (String name : new String[] {"java.awt.Desktop", "javax.swing.JFileChooser", "java.net.http.HttpClient"}) {
                 try {
+                    Map<String, Set<Object>> opens = new HashMap<String, Set<Object>>();
+                    // FileDialog keeps its picked files in a private field
+                    if (name.equals("java.awt.Desktop")) opens.put("java.awt", Collections.singleton(ours));
                     redefine(inst, getModule.invoke(Class.forName(name, false, platform)), ours,
-                            Collections.<String, Set<Object>>emptyMap());
+                            Collections.<String, Set<Object>>emptyMap(), opens);
                 } catch (Throwable ignored) {
                     // headless or stripped runtime
                 }
@@ -92,7 +95,8 @@ public final class Main {
             Object ours = getModule.invoke(Main.class);
             Method canRead = module.getClass().getMethod("canRead", Class.forName("java.lang.Module"));
             if (!(Boolean) canRead.invoke(module, ours)) {
-                redefine(instrumentation, module, ours, Collections.<String, Set<Object>>emptyMap());
+                redefine(instrumentation, module, ours, Collections.<String, Set<Object>>emptyMap(),
+                        Collections.<String, Set<Object>>emptyMap());
             }
         } catch (NoSuchMethodException java8) {
             // nothing to do
@@ -101,13 +105,13 @@ public final class Main {
         }
     }
 
-    private static void redefine(Instrumentation inst, Object module, Object reader, Map<String, Set<Object>> exports)
-            throws Exception {
+    private static void redefine(Instrumentation inst, Object module, Object reader, Map<String, Set<Object>> exports,
+            Map<String, Set<Object>> opens) throws Exception {
         Class<?> moduleClass = Class.forName("java.lang.Module");
         Method redefine = Instrumentation.class.getMethod(
                 "redefineModule", moduleClass, Set.class, Map.class, Map.class, Set.class, Map.class);
         redefine.invoke(inst, module, Collections.singleton(reader), exports,
-                Collections.emptyMap(), Collections.emptySet(), Collections.emptyMap());
+                opens, Collections.emptySet(), Collections.emptyMap());
     }
 
     static void log(String message) {

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use oneclient_broker::{
-    Activity, ActivityKind, BoxFuture, BrokerHost, LaunchDescriptor, OpenTarget, PickMode,
+    Activity, ActivityKind, BoxFuture, BrokerHost, LaunchDescriptor, OpenTarget, PickRequest,
 };
 use uuid::Uuid;
 
@@ -28,7 +28,7 @@ impl BrokerHost for Host {
         self.opened.lock().unwrap().push(target);
     }
 
-    fn pick(&self, _mode: PickMode, _title: String) -> BoxFuture<'_, Option<PathBuf>> {
+    fn pick(&self, _request: PickRequest) -> BoxFuture<'_, Option<PathBuf>> {
         Box::pin(async { Some(PathBuf::from("picked.png")) })
     }
 }
@@ -70,6 +70,13 @@ public class Probe {
                 .PUT(java.net.http.HttpRequest.BodyPublishers.ofString("{}")).build(),
             java.net.http.HttpResponse.BodyHandlers.ofByteArray()).get().statusCode();
         System.out.println("async=" + async);
+
+        // AWT's file dialog (a waypoint mod's fallback): the launcher picks instead
+        if (!java.awt.GraphicsEnvironment.isHeadless()) {
+            java.awt.FileDialog fd = new java.awt.FileDialog((java.awt.Frame) null, "Pick", java.awt.FileDialog.LOAD);
+            fd.setVisible(true);
+            System.out.println("filedialog=" + fd.getFile() + "," + fd.getFiles().length);
+        }
 
         // jagrosh-style Discord IPC: the pipe opened as a file
         if (System.getProperty("os.name").startsWith("Windows")) {
@@ -118,7 +125,10 @@ async fn the_agent_routes_account_requests_through_the_broker() {
     );
     // stands in for the launcher's Discord relay
     #[cfg(windows)]
-    let discord_pipe = format!(r"\\.\pipe\oneclient-test-discord-{}", Uuid::new_v4().simple());
+    let discord_pipe = format!(
+        r"\\.\pipe\oneclient-test-discord-{}",
+        Uuid::new_v4().simple()
+    );
     #[cfg(windows)]
     let discord = {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -165,12 +175,10 @@ async fn the_agent_routes_account_requests_through_the_broker() {
     let mut expected = vec!["opened=0", "folder=0", "modern=403", "async=403"];
     if cfg!(windows) {
         expected.push("discord=k");
+        expected.push("filedialog=picked.png,1");
     }
     for line in expected {
-        assert!(
-            stdout.contains(line),
-            "stdout: {stdout}\nstderr: {stderr}"
-        );
+        assert!(stdout.contains(line), "stdout: {stdout}\nstderr: {stderr}");
     }
 
     let log = host.log.lock().unwrap().clone();

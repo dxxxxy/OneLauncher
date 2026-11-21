@@ -460,13 +460,19 @@ public final class Hooks {
     private static final byte OPEN_FILE = 0, OPEN_FOLDER = 1, SAVE_FILE = 2;
 
     private static String pick(final byte mode, final String title) {
+        return pick(mode, title, java.util.Collections.<String>emptyList());
+    }
+
+    /** {@code filters}: {@code name|ext;ext} each, see {@code PickFilter} */
+    static String pick(final byte mode, final String title, final List<String> filters) {
         final String caller = Bridge.caller();
         try {
             Bridge.Reply reply = Bridge.INSTANCE.call(Bridge.PICK, new Bridge.Body() {
                 public void write(DataOutputStream out) throws IOException {
                     out.writeByte(mode);
                     Bridge.writeString(out, title);
-                    out.writeShort(0);
+                    out.writeShort(filters.size());
+                    for (String filter : filters) Bridge.writeString(out, filter);
                     Bridge.writeString(out, caller);
                 }
             }, 30L * 60L * 1000L);
@@ -494,6 +500,142 @@ public final class Hooks {
 
     public static Object tinyFolder(Object title) {
         return sandboxed ? pick(OPEN_FOLDER, title(title)) : PASS;
+    }
+
+    // ---- org.lwjgl.sdl.SDLDialog (26.1+)
+
+    private static final String SDL_DIALOG = "org.lwjgl.sdl.SDLDialog";
+
+    public static Object sdlOpenFileDialog(long callback, long userdata, long window, long filters, int count,
+            long location, boolean many) throws Exception {
+        if (!sandboxed) return PASS;
+        sdlDialog(OPEN_FILE, "", sdlFilters(filters, count), callback, userdata);
+        return Boolean.TRUE;
+    }
+
+    public static Object sdlSaveFileDialog(long callback, long userdata, long window, long filters, int count,
+            long location) throws Exception {
+        if (!sandboxed) return PASS;
+        sdlDialog(SAVE_FILE, "", sdlFilters(filters, count), callback, userdata);
+        return Boolean.TRUE;
+    }
+
+    public static Object sdlOpenFolderDialog(long callback, long userdata, long window, long location, boolean many)
+            throws Exception {
+        if (!sandboxed) return PASS;
+        sdlDialog(OPEN_FOLDER, "", java.util.Collections.<String>emptyList(), callback, userdata);
+        return Boolean.TRUE;
+    }
+
+    /** SDL_FILEDIALOG_OPENFILE = 0, SAVEFILE = 1, OPENFOLDER = 2; everything else is in {@code props} */
+    public static Object sdlFileDialogWithProperties(int type, long callback, long userdata, int props)
+            throws Exception {
+        if (!sandboxed) return PASS;
+        byte mode = type == 1 ? SAVE_FILE : type == 2 ? OPEN_FOLDER : OPEN_FILE;
+        Class<?> dialog = libraryClass(SDL_DIALOG, SDL_DIALOG);
+        Class<?> properties = libraryClass(SDL_DIALOG, "org.lwjgl.sdl.SDLProperties");
+        Integer id = Integer.valueOf(props);
+        // read now: the caller may destroy the properties as soon as this returns
+        Object title = properties.getMethod("SDL_GetStringProperty", int.class, CharSequence.class, CharSequence.class)
+                .invoke(null, id, dialog.getField("SDL_PROP_FILE_DIALOG_TITLE_STRING").get(null), null);
+        long filters = ((Long) properties.getMethod("SDL_GetPointerProperty", int.class, CharSequence.class, long.class)
+                .invoke(null, id, dialog.getField("SDL_PROP_FILE_DIALOG_FILTERS_POINTER").get(null),
+                        Long.valueOf(0L))).longValue();
+        long count = ((Long) properties.getMethod("SDL_GetNumberProperty", int.class, CharSequence.class, long.class)
+                .invoke(null, id, dialog.getField("SDL_PROP_FILE_DIALOG_NFILTERS_NUMBER").get(null),
+                        Long.valueOf(0L))).longValue();
+        List<String> wanted = mode == OPEN_FOLDER ? java.util.Collections.<String>emptyList()
+                : sdlFilters(filters, (int) Math.min(count, 32L));
+        sdlDialog(mode, title(title), wanted, callback, userdata);
+        return Boolean.TRUE;
+    }
+
+    /** An array of {@code SDL_DialogFileFilter {const char *name, *pattern}} as {@code name|pattern} */
+    private static List<String> sdlFilters(long filters, int count) throws Exception {
+        List<String> out = new java.util.ArrayList<String>();
+        if (filters == 0L || count <= 0) return out;
+        Class<?> filter = libraryClass(SDL_DIALOG, "org.lwjgl.sdl.SDL_DialogFileFilter");
+        int size = filter.getField("SIZEOF").getInt(null);
+        Method name = filter.getMethod("nnameString", long.class);
+        Method pattern = filter.getMethod("npatternString", long.class);
+        for (int i = 0; i < Math.min(count, 32); i++) {
+            Long at = Long.valueOf(filters + (long) i * size);
+            Object n = name.invoke(null, at);
+            Object p = pattern.invoke(null, at);
+            if (p != null) out.add((n == null ? "" : n) + "|" + p);
+        }
+        return out;
+    }
+
+    /**
+     * SDL dialogs return at once and report through the callback, from any
+     * thread; so does this, once the launcher's picker closes. The list is
+     * null-terminated UTF-8 paths, with no paths for cancel, as SDL does.
+     */
+    private static void sdlDialog(final byte mode, final String title, final List<String> filters,
+            final long callback, final long userdata) {
+        Thread t = new Thread(new Runnable() {
+            public void run() {
+                String path = pick(mode, title, filters);
+                try {
+                    answerSdlDialog(path, callback, userdata);
+                } catch (Throwable e) {
+                    Main.log("could not answer a file dialog: " + e);
+                }
+            }
+        }, "OneClient file dialog");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private static void answerSdlDialog(String path, long callback, long userdata) throws Exception {
+        Class<?> memory = libraryClass(SDL_DIALOG, "org.lwjgl.system.MemoryUtil");
+        int pointer = libraryClass(SDL_DIALOG, "org.lwjgl.system.Pointer").getField("POINTER_SIZE").getInt(null);
+        Method alloc = memory.getMethod("nmemAllocChecked", long.class);
+        Method put = memory.getMethod("memPutAddress", long.class, long.class);
+        Method free = memory.getMethod("nmemFree", long.class);
+        long list = ((Long) alloc.invoke(null, Long.valueOf(2L * pointer))).longValue();
+        long text = 0L;
+        try {
+            if (path != null) {
+                byte[] utf8 = path.getBytes(Bridge.UTF8);
+                text = ((Long) alloc.invoke(null, Long.valueOf(utf8.length + 1))).longValue();
+                Method putByte = memory.getMethod("memPutByte", long.class, byte.class);
+                for (int i = 0; i < utf8.length; i++) {
+                    putByte.invoke(null, Long.valueOf(text + i), Byte.valueOf(utf8[i]));
+                }
+                putByte.invoke(null, Long.valueOf(text + utf8.length), Byte.valueOf((byte) 0));
+            }
+            put.invoke(null, Long.valueOf(list), Long.valueOf(text));
+            put.invoke(null, Long.valueOf(list + pointer), Long.valueOf(0L));
+            Class<?> cb = libraryClass(SDL_DIALOG, "org.lwjgl.sdl.SDL_DialogFileCallback");
+            Object function = cb.getMethod("create", long.class).invoke(null, Long.valueOf(callback));
+            cb.getMethod("invoke", long.class, long.class, int.class)
+                    .invoke(function, Long.valueOf(userdata), Long.valueOf(list), Integer.valueOf(-1));
+        } finally {
+            if (text != 0L) free.invoke(null, Long.valueOf(text));
+            free.invoke(null, Long.valueOf(list));
+        }
+    }
+
+    // ---- java.awt.FileDialog
+
+    /** Shows nothing: the launcher's picker runs instead and its answer goes into the dialog. */
+    public static boolean dialogShow(Object dialog) {
+        if (!sandboxed || !(dialog instanceof java.awt.FileDialog)) return false;
+        java.awt.FileDialog fd = (java.awt.FileDialog) dialog;
+        String path = pick(fd.getMode() == java.awt.FileDialog.SAVE ? SAVE_FILE : OPEN_FILE, title(fd.getTitle()));
+        File picked = path == null ? null : new File(path);
+        fd.setDirectory(picked == null ? null : picked.getParent());
+        fd.setFile(picked == null ? null : picked.getName());
+        try {
+            java.lang.reflect.Field files = java.awt.FileDialog.class.getDeclaredField("files");
+            files.setAccessible(true);
+            files.set(fd, picked == null ? null : new File[] {picked});
+        } catch (Throwable notOpen) {
+            // getFiles() stays empty; getFile() and getDirectory() still answer
+        }
+        return true;
     }
 
     // javax.swing.JFileChooser: result codes APPROVE_OPTION = 0, CANCEL_OPTION = 1

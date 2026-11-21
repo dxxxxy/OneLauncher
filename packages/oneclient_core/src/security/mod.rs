@@ -13,7 +13,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use oneclient_broker::{Activity, PickMode, RunningBroker};
+use oneclient_broker::{Activity, PickRequest, RunningBroker};
 use oneclient_common::paths;
 
 pub use host::LauncherBrokerHost;
@@ -24,11 +24,7 @@ pub trait SecurityUi: Send + Sync + 'static {
     fn open_url(&self, url: &str);
     fn open_path(&self, path: &Path);
     /// Show the native picker. `Save` returns the destination the user chose
-    fn pick(
-        &self,
-        mode: PickMode,
-        title: String,
-    ) -> oneclient_broker::BoxFuture<'_, Option<PathBuf>>;
+    fn pick(&self, request: PickRequest) -> oneclient_broker::BoxFuture<'_, Option<PathBuf>>;
 }
 
 const ACTIVITY_LIMIT: usize = 500;

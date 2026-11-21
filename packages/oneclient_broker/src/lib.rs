@@ -30,8 +30,8 @@ use uuid::Uuid;
 
 pub use activity::{Activity, ActivityKind};
 pub use discord::DiscordRelay;
-pub use protocol::PickMode;
-pub use session::{BoxFuture, BrokerHost, OpenTarget, validate_open};
+pub use protocol::{PickFilter, PickMode};
+pub use session::{BoxFuture, BrokerHost, OpenTarget, PickRequest, validate_open};
 use session::{SessionConfig, Shared};
 pub use transport::Endpoint;
 
@@ -199,7 +199,7 @@ mod tests {
 
         fn open(&self, _target: OpenTarget) {}
 
-        fn pick(&self, _mode: PickMode, _title: String) -> BoxFuture<'_, Option<PathBuf>> {
+        fn pick(&self, _request: PickRequest) -> BoxFuture<'_, Option<PathBuf>> {
             Box::pin(async { None })
         }
     }

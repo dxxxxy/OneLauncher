@@ -3,7 +3,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use oneclient_auth::AuthService;
-use oneclient_broker::{Activity, ActivityKind, BoxFuture, BrokerHost, OpenTarget, PickMode};
+use oneclient_broker::{
+    Activity, ActivityKind, BoxFuture, BrokerHost, OpenTarget, PickMode, PickRequest,
+};
 use oneclient_events::EventBus;
 use uuid::Uuid;
 
@@ -98,10 +100,11 @@ impl BrokerHost for LauncherBrokerHost {
         }
     }
 
-    fn pick(&self, mode: PickMode, title: String) -> BoxFuture<'_, Option<PathBuf>> {
+    fn pick(&self, request: PickRequest) -> BoxFuture<'_, Option<PathBuf>> {
         Box::pin(async move {
             let ui = self.security.ui()?;
-            let chosen = ui.pick(mode, title).await?;
+            let mode = request.mode;
+            let chosen = ui.pick(request).await?;
             if let Some(reason) = oneclient_sandbox::sensitive_reason(&chosen) {
                 self.events
                     .notify("Can't share that with the game")

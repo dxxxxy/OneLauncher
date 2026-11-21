@@ -57,6 +57,40 @@ pub enum PickMode {
     SaveFile,
 }
 
+/// One "files of this type" entry of a picker, `name|ext;ext` on the wire
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickFilter {
+    pub name: String,
+    /// Without the dot; `*` means any file
+    pub extensions: Vec<String>,
+}
+
+impl PickFilter {
+    /// `Images|png;jpg`, `*.png;*.jpg` (tinyfd) or `png` (SDL) all parse
+    pub fn parse(wire: &str) -> Option<Self> {
+        let (name, patterns) = match wire.rsplit_once('|') {
+            Some((name, patterns)) => (name.trim(), patterns),
+            None => ("", wire),
+        };
+        let extensions: Vec<String> = patterns
+            .split([';', ',', ' '])
+            .map(|p| p.trim().trim_start_matches('*').trim_start_matches('.'))
+            .map(|p| if p.is_empty() { "*" } else { p })
+            .filter(|p| p.len() <= 32 && !p.contains(['/', '\\']))
+            .map(str::to_string)
+            .collect();
+        if extensions.is_empty() {
+            return None;
+        }
+        let name = if name.is_empty() {
+            extensions.join(", ")
+        } else {
+            name.chars().take(80).collect()
+        };
+        Some(Self { name, extensions })
+    }
+}
+
 impl PickMode {
     fn from_byte(byte: u8) -> io::Result<Self> {
         match byte {
@@ -414,5 +448,17 @@ mod tests {
     async fn oversized_frames_are_refused() {
         let mut data: &[u8] = &(MAX_FRAME + 1).to_be_bytes();
         assert!(read_frame(&mut data).await.is_err());
+    }
+
+    #[test]
+    fn pick_filters_parse_every_library_style() {
+        let f = |s: &str| PickFilter::parse(s).unwrap();
+        assert_eq!(f("Images|png;jpg").extensions, ["png", "jpg"]);
+        assert_eq!(f("Images|png;jpg").name, "Images");
+        assert_eq!(f("*.png *.jpg").extensions, ["png", "jpg"]);
+        assert_eq!(f("*.png *.jpg").name, "png, jpg");
+        assert_eq!(f("All|*").extensions, ["*"]);
+        assert_eq!(f("Odd|a/b;zip").extensions, ["zip"]);
+        assert!(PickFilter::parse("Bad|../x").is_none());
     }
 }

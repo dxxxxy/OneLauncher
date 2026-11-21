@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::activity::{Activity, ActivityKind};
 use crate::limiter::JoinLimiter;
 use crate::policy::{self, Decision, Route, TokenPlacement};
-use crate::protocol::{self, PickMode, Reply, Request};
+use crate::protocol::{self, PickFilter, PickMode, Reply, Request};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -28,7 +28,15 @@ pub trait BrokerHost: Send + Sync + 'static {
     fn open(&self, target: OpenTarget);
     /// Show a native picker outside the sandbox and make the choice reachable
     /// from inside it
-    fn pick(&self, mode: PickMode, title: String) -> BoxFuture<'_, Option<PathBuf>>;
+    fn pick(&self, request: PickRequest) -> BoxFuture<'_, Option<PathBuf>>;
+}
+
+/// What the game asked its picker for
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickRequest {
+    pub mode: PickMode,
+    pub title: String,
+    pub filters: Vec<PickFilter>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,10 +149,22 @@ pub(crate) async fn handle(shared: &Shared, request: Request) -> Reply {
         Request::Pick {
             mode,
             title,
-            filters: _,
+            filters,
             caller,
         } => {
-            let picked = shared.host.pick(mode, title).await;
+            let filters = filters
+                .iter()
+                .take(32)
+                .filter_map(|f| PickFilter::parse(f))
+                .collect();
+            let picked = shared
+                .host
+                .pick(PickRequest {
+                    mode,
+                    title,
+                    filters,
+                })
+                .await;
             shared.record(ActivityKind::Picked {
                 path: picked.as_ref().map(|p| p.display().to_string()),
                 caller,

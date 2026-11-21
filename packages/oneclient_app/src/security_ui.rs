@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use oneclient_broker::{BoxFuture, PickMode};
+use oneclient_broker::{BoxFuture, PickMode, PickRequest};
 use oneclient_core::security::SecurityUi;
 
 pub struct AppSecurityUi;
@@ -18,14 +18,24 @@ impl SecurityUi for AppSecurityUi {
         crate::platform::open_path(&path.display().to_string());
     }
 
-    fn pick(&self, mode: PickMode, title: String) -> BoxFuture<'_, Option<PathBuf>> {
+    fn pick(&self, request: PickRequest) -> BoxFuture<'_, Option<PathBuf>> {
         Box::pin(async move {
             let mut dialog = rfd::AsyncFileDialog::new();
-            if !title.trim().is_empty() {
-                dialog = dialog.set_title(format!("{title} (for your game)"));
+            if !request.title.trim().is_empty() {
+                dialog = dialog.set_title(format!("{} (for your game)", request.title));
+            }
+            // a filter for "any file" makes every other one pointless
+            if !request
+                .filters
+                .iter()
+                .any(|f| f.extensions.iter().any(|e| e == "*"))
+            {
+                for filter in &request.filters {
+                    dialog = dialog.add_filter(&filter.name, &filter.extensions);
+                }
             }
             crate::platform::focus_window();
-            let handle = match mode {
+            let handle = match request.mode {
                 PickMode::OpenFile => dialog.pick_file().await,
                 PickMode::OpenFolder => dialog.pick_folder().await,
                 PickMode::SaveFile => dialog.save_file().await,
