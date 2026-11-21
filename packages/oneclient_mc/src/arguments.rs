@@ -23,6 +23,7 @@ pub fn java_arguments(
     custom_args: String,
     java_arch: &str,
     java_major: u32,
+    has_vector_module: bool,
 ) -> McResult<Vec<String>> {
     let mut parsed = Vec::new();
     if let Some(args) = arguments {
@@ -62,7 +63,8 @@ pub fn java_arguments(
 
     parsed.extend(performance_flags(java_major, java_arch, mem_max, &custom));
 
-    if java_major >= 21 {
+    // naming a module the runtime doesn't ship stops the JVM before the game
+    if java_major >= 21 && has_vector_module {
         parsed.push("--add-modules=jdk.incubator.vector".to_string());
     }
 
@@ -1060,6 +1062,7 @@ mod tests {
             String::new(),
             "arm64",
             21,
+            true,
         )
         .unwrap();
 
@@ -1088,6 +1091,7 @@ mod tests {
             String::new(),
             "aarch64",
             25,
+            false,
         )
         .unwrap();
 

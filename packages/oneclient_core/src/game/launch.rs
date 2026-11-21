@@ -455,6 +455,7 @@ async fn start(
         jvm_args_with(profile.launch_args.as_deref(), extra_jvm_arg),
         &java.os_arch,
         java.major,
+        runtime_has_module(&java.absolute_path, "jdk.incubator.vector"),
     )?;
     jvm_args.splice(0..0, protected.jvm_arguments());
 
@@ -1352,7 +1353,20 @@ mod tests {
 
 #[cfg(test)]
 mod jvm_arg_tests {
-    use super::jvm_args_with;
+    use super::{jvm_args_with, release_lists};
+
+    #[test]
+    fn the_vector_module_is_only_named_when_the_runtime_ships_it() {
+        let temurin = "JAVA_VERSION=\"25\"
+MODULES=\"java.base jdk.incubator.vector jdk.jfr\"
+";
+        let jbr = "JAVA_VERSION=\"25.0.4\"
+MODULES=\"java.base java.desktop jdk.jfr\"
+";
+        assert!(release_lists(temurin, "jdk.incubator.vector"));
+        assert!(!release_lists(jbr, "jdk.incubator.vector"));
+        assert!(!release_lists("", "jdk.incubator.vector"));
+    }
 
     #[test]
     fn the_extra_argument_lands_after_the_profile() {
@@ -1361,6 +1375,29 @@ mod jvm_arg_tests {
         assert_eq!(jvm_args_with(Some("-Xss2m"), None), "-Xss2m");
         assert_eq!(jvm_args_with(None, None), "");
     }
+}
+
+/// Some runtimes leave the incubator modules out (JetBrains Runtime, jlinked
+/// JREs), so this reads the module list from the runtime's `release` file.
+/// Without one it answers no: the flags that need a module are optional
+fn runtime_has_module(java_path: &str, module: &str) -> bool {
+    let Some(home) = Path::new(java_path).parent().and_then(Path::parent) else {
+        return false;
+    };
+    std::fs::read_to_string(home.join("release"))
+        .is_ok_and(|release| release_lists(&release, module))
+}
+
+fn release_lists(release: &str, module: &str) -> bool {
+    release
+        .lines()
+        .filter_map(|line| line.strip_prefix("MODULES="))
+        .any(|modules| {
+            modules
+                .trim_matches('"')
+                .split_whitespace()
+                .any(|m| m == module)
+        })
 }
 
 /// The sandbox and the broker for one launch
