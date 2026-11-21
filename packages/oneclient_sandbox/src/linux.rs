@@ -154,9 +154,16 @@ impl Plan {
             if let Some(runtime_dir) = &runtime_dir {
                 args.push("--dir".into());
                 args.push(runtime_dir.clone().into());
-                if let Some(relay) = &policy.discord_socket {
+                // the relay's folder, not its socket: a launcher started
+                // again while the game runs makes a new socket there, which
+                // a bind of the old one would never show
+                if let Some(relay_dir) = policy.discord_socket.as_deref().and_then(Path::parent) {
+                    let inside = runtime_dir.join(".oneclient-discord");
                     args.push("--bind".into());
-                    args.push(relay.clone().into());
+                    args.push(relay_dir.to_path_buf().into());
+                    args.push(inside.into());
+                    args.push("--symlink".into());
+                    args.push(".oneclient-discord/discord-ipc-0".into());
                     args.push(runtime_dir.join("discord-ipc-0").into());
                 }
                 if let Some(wayland) = std::env::var_os("WAYLAND_DISPLAY") {

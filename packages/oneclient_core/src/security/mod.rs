@@ -219,17 +219,60 @@ impl SecurityService {
     }
 }
 
+/// What a running game gets from the launcher, kept outside every sandbox
+/// so a launcher started again while the game runs can serve it again.
+/// Holds the broker's key and fake token
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SavedSession {
+    #[serde(default)]
+    pub broker: Option<oneclient_broker::LaunchDescriptor>,
+    /// The Discord relay the game was pointed at: the pipe on Windows, the
+    /// socket on Unix
+    #[serde(default)]
+    pub discord: Option<PathBuf>,
+    /// Windows: the AppContainer allowed to open the relay
+    #[serde(default)]
+    pub app_container_sid: Option<String>,
+}
+
+impl SavedSession {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.broker.is_none() && self.discord.is_none()
+    }
+
+    pub(crate) async fn save(&self, cluster_id: i64) -> Result<(), polyio::IOError> {
+        let path = session_file(cluster_id).map_err(std::io::Error::other)?;
+        if let Some(parent) = path.parent() {
+            polyio::create_dir_all(parent).await?;
+        }
+        polyio::write_json_atomic(&path, self).await
+    }
+
+    pub(crate) async fn load(cluster_id: i64) -> Option<Self> {
+        let path = session_file(cluster_id).ok()?;
+        Self::from_json(polyio::read_json::<serde_json::Value>(&path).await.ok()?)
+    }
+
+    fn from_json(value: serde_json::Value) -> Option<Self> {
+        // launchers before the relay was saved wrote the bare descriptor
+        if value.get("key").is_some() {
+            return Some(Self {
+                broker: serde_json::from_value(value).ok(),
+                ..Self::default()
+            });
+        }
+        serde_json::from_value(value).ok()
+    }
+}
+
 /// A game that outlived the last launcher gets its broker back, on the same
-/// channels and key, so its agent reconnects and it can keep joining servers
-pub(crate) async fn resume_broker(
+/// channels and key, so its agent reconnects and it can keep joining
+/// servers, and its Discord relay at the same address
+pub(crate) async fn resume_session(
     state: &Arc<crate::state::LauncherState>,
     cluster: &oneclient_cluster::Cluster,
 ) {
-    let Ok(path) = session_file(cluster.id) else {
-        return;
-    };
-    let Ok(descriptor) = polyio::read_json::<oneclient_broker::LaunchDescriptor>(&path).await
-    else {
+    let Some(saved) = SavedSession::load(cluster.id).await else {
         return;
     };
     let Ok(cluster_dir) = cluster.dir() else {
@@ -241,18 +284,48 @@ pub(crate) async fn resume_broker(
         cluster_dir,
         InstanceSecurity::load(cluster.id).await.sandbox,
     ));
-    match oneclient_broker::start(&descriptor, host, state.services.requester.http().clone()) {
-        Ok(running) => {
-            tracing::info!(
+    if let Some(descriptor) = &saved.broker {
+        match oneclient_broker::start(
+            descriptor,
+            host.clone(),
+            state.services.requester.http().clone(),
+        ) {
+            Ok(running) => {
+                tracing::info!(
+                    cluster_id = cluster.id,
+                    "resumed the token broker for a running game"
+                );
+                state.security.keep_broker(cluster.id, running);
+            }
+            Err(err) => tracing::warn!(
                 cluster_id = cluster.id,
-                "resumed the token broker for a running game"
-            );
-            state.security.keep_broker(cluster.id, running);
+                "could not resume the token broker: {err}"
+            ),
         }
-        Err(err) => tracing::warn!(
-            cluster_id = cluster.id,
-            "could not resume the token broker: {err}"
-        ),
+    }
+    if let Some(path) = &saved.discord {
+        #[cfg(windows)]
+        let relay = oneclient_broker::DiscordRelay::start_at(
+            cluster.id,
+            host,
+            saved.app_container_sid.as_deref(),
+            path,
+        );
+        #[cfg(unix)]
+        let relay = match path.parent() {
+            Some(dir) => oneclient_broker::DiscordRelay::start(cluster.id, host, dir.to_path_buf()),
+            None => Err(std::io::ErrorKind::InvalidInput.into()),
+        };
+        match relay {
+            Ok(relay) => {
+                tracing::info!(cluster_id = cluster.id, "resumed the Discord relay");
+                state.security.keep_discord_relay(cluster.id, relay);
+            }
+            Err(err) => tracing::warn!(
+                cluster_id = cluster.id,
+                "could not resume the Discord relay: {err}"
+            ),
+        }
     }
 }
 
@@ -318,7 +391,32 @@ pub(crate) async fn has_voice_mod(mods_dir: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::denied_path;
+    use super::{SavedSession, denied_path};
+
+    #[test]
+    fn sessions_from_older_launchers_still_resume() {
+        let descriptor = oneclient_broker::LaunchDescriptor::new(
+            3,
+            uuid::Uuid::from_u128(1),
+            vec![],
+            Some("S-1-15-2-1".into()),
+            None,
+        );
+        let legacy = serde_json::to_value(&descriptor).unwrap();
+        let saved = SavedSession::from_json(legacy).unwrap();
+        assert_eq!(saved.broker.unwrap().key, descriptor.key);
+        assert_eq!(saved.discord, None);
+
+        let current = SavedSession {
+            broker: None,
+            discord: Some(r"\\.\pipe\oneclient-discord-1".into()),
+            app_container_sid: Some("S-1-15-2-1".into()),
+        };
+        let back = SavedSession::from_json(serde_json::to_value(&current).unwrap()).unwrap();
+        assert!(back.broker.is_none());
+        assert_eq!(back.discord, current.discord);
+        assert_eq!(back.app_container_sid, current.app_container_sid);
+    }
 
     #[test]
     fn finds_the_path_in_java_access_errors() {

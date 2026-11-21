@@ -276,10 +276,39 @@ impl DiscordRelay {
         host: Arc<dyn BrokerHost>,
         app_container_sid: Option<&str>,
     ) -> io::Result<Self> {
+        let name = format!(
+            r"\\.\pipe\oneclient-discord-{}",
+            uuid::Uuid::new_v4().simple()
+        );
         Self::start_with(
             cluster_id,
             host,
             app_container_sid,
+            &name,
+            Arc::new(|| Box::pin(windows::discord()) as Connecting),
+        )
+    }
+
+    /// Serves `path` again, for a game that outlived the launcher that made
+    /// the relay: the game was told this name and keeps reconnecting to it
+    pub fn start_at(
+        cluster_id: i64,
+        host: Arc<dyn BrokerHost>,
+        app_container_sid: Option<&str>,
+        path: &std::path::Path,
+    ) -> io::Result<Self> {
+        let name = path.to_string_lossy();
+        if !name.starts_with(r"\\.\pipe\oneclient-discord-") {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not a Discord relay pipe",
+            ));
+        }
+        Self::start_with(
+            cluster_id,
+            host,
+            app_container_sid,
+            &name,
             Arc::new(|| Box::pin(windows::discord()) as Connecting),
         )
     }
@@ -288,16 +317,23 @@ impl DiscordRelay {
         cluster_id: i64,
         host: Arc<dyn BrokerHost>,
         app_container_sid: Option<&str>,
+        name: &str,
         connect: Connect,
     ) -> io::Result<Self> {
-        let name = format!(
-            r"\\.\pipe\oneclient-discord-{}",
-            uuid::Uuid::new_v4().simple()
-        );
+        let name = name.to_string();
         let security = Arc::new(windows::security(app_container_sid)?);
         // the first instance claims the name; a few more wait alongside so a
-        // library's existence check never leaves the pipe busy for its open
-        let mut servers = vec![windows::create(&name, &security, true)?];
+        // library's existence check never leaves the pipe busy for its open.
+        // A name the last launcher made can linger while the game still
+        // holds a connection to it, so the first may have to join it
+        let first = match windows::create(&name, &security, true) {
+            Ok(first) => first,
+            Err(err) => {
+                tracing::debug!("Discord relay pipe still exists ({err}); joining it");
+                windows::create(&name, &security, false)?
+            }
+        };
+        let mut servers = vec![first];
         for _ in 1..LISTENERS {
             servers.push(windows::create(&name, &security, false)?);
         }
@@ -566,7 +602,12 @@ mod tests {
             }) as Connecting
         });
         let host = Arc::new(Host::default());
-        let relay = DiscordRelay::start_with(7, host.clone(), None, connect).unwrap();
+        let name = format!(
+            r"\\.\pipe\oneclient-discord-{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let relay =
+            DiscordRelay::start_with(7, host.clone(), None, &name, Arc::clone(&connect)).unwrap();
         assert!(relay.jvm_property().unwrap().contains("oneclient-discord-"));
 
         for _ in 0..2 {
@@ -578,6 +619,30 @@ mod tests {
             send(&mut game, FRAME, json!({"cmd": "GET_GUILDS", "nonce": "x"})).await;
             assert_eq!(next(&mut game).await.1["evt"], "ERROR");
         }
+
+        // the launcher restarts while the game still holds a connection:
+        // the new one serves the same name, and the game reconnects to it
+        let held = ClientOptions::new().open(relay.path()).unwrap();
+        drop(relay);
+        // aborted listeners close their pipe ends once they next run; a
+        // launcher that died has none left at all
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let again =
+            DiscordRelay::start_with(7, host.clone(), None, &name, Arc::clone(&connect)).unwrap();
+        drop(held);
+        let mut game = ClientOptions::new().open(again.path()).unwrap();
+        send(&mut game, HANDSHAKE, json!({"v": 1})).await;
+        assert_eq!(next(&mut game).await.0, HANDSHAKE);
+        assert!(
+            DiscordRelay::start_at(
+                7,
+                host.clone(),
+                None,
+                std::path::Path::new(r"\\.\pipe\discord-ipc-0")
+            )
+            .is_err()
+        );
+
         let log = host.0.lock().unwrap();
         assert_eq!(log.len(), 2);
         assert!(

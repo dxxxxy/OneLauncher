@@ -1723,18 +1723,22 @@ async fn protect_launch(
         let running =
             oneclient_broker::start(&descriptor, host, state.services.requester.http().clone())
                 .map_err(|err| GameError::Broker(err.to_string()))?;
-        let session = crate::security::session_file(cluster.id)?;
-        if let Some(parent) = session.parent() {
-            polyio::create_dir_all(parent).await?;
-        }
-        descriptor
-            .save(&session)
-            .await
-            .map_err(|err| GameError::Broker(err.to_string()))?;
         Some((descriptor, running))
     } else {
         None
     };
+
+    let saved = crate::security::SavedSession {
+        broker: broker.as_ref().map(|(descriptor, _)| descriptor.clone()),
+        discord: discord.as_ref().map(|relay| relay.path().to_path_buf()),
+        app_container_sid: sandbox.app_container_sid.clone(),
+    };
+    if !saved.is_empty() {
+        saved
+            .save(cluster.id)
+            .await
+            .map_err(|err| GameError::Broker(err.to_string()))?;
+    }
 
     // the broker needs the agent, and so does a sandboxed game on its own
     // (fullscreen, Discord, paths the sandbox can't list)

@@ -256,12 +256,11 @@ impl BrokerHost for LauncherBrokerHost {
                 .filter(|a| a.kind == oneclient_auth::AccountKind::Microsoft && !a.signed_out)
                 .ok_or("that isn't one of your OneClient accounts")?;
             // a launcher restart picks the broker back up as this account
-            if let Ok(path) = super::session_file(self.cluster_id)
-                && let Ok(mut descriptor) =
-                    polyio::read_json::<oneclient_broker::LaunchDescriptor>(&path).await
+            if let Some(mut saved) = super::SavedSession::load(self.cluster_id).await
+                && let Some(descriptor) = &mut saved.broker
             {
                 descriptor.account = to;
-                let _ = descriptor.save(&path).await;
+                let _ = saved.save(self.cluster_id).await;
             }
             self.events
                 .notify(format!("Switched account in {}", self.cluster_name))
