@@ -419,6 +419,21 @@ async fn start(
     let arg_map = version_info.arguments.clone().unwrap_or_default();
 
     let protected = protect_launch(state, &cluster, &cwd, &java.absolute_path, account).await?;
+    // after the sandbox's grants, so they never spread through the links
+    let assets = if protected.sandbox.is_sandboxed() {
+        match sandboxed_assets(&cluster.dir()?, &assets).await {
+            Ok(view) => view,
+            Err(err) => {
+                tracing::warn!(
+                    cluster_id,
+                    "could not set up the instance's skin cache: {err}"
+                );
+                assets
+            }
+        }
+    } else {
+        assets
+    };
 
     let classpaths = arguments::classpaths(
         &libraries,
@@ -1222,6 +1237,39 @@ fn stderr_detail(bytes: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn sandboxed_assets_link_the_shared_files_and_keep_skins_private() {
+        let shared = polyio::tempdir().await.expect("shared dir");
+        let cluster = polyio::tempdir().await.expect("cluster dir");
+        let (shared, cluster) = (shared.dir_path(), cluster.dir_path());
+        polyio::create_dir_all(shared.join("objects/ab"))
+            .await
+            .unwrap();
+        polyio::write(shared.join("objects/ab/abcd"), b"sound")
+            .await
+            .unwrap();
+        polyio::create_dir_all(shared.join("indexes"))
+            .await
+            .unwrap();
+        polyio::create_dir_all(shared.join("skins")).await.unwrap();
+
+        let view = sandboxed_assets(cluster, shared).await.unwrap();
+        // twice: a later launch reuses the links
+        assert_eq!(sandboxed_assets(cluster, shared).await.unwrap(), view);
+
+        assert_eq!(
+            polyio::read(view.join("objects/ab/abcd")).await.unwrap(),
+            b"sound"
+        );
+        assert!(view.join("indexes").is_dir());
+        let skins = polyio::symlink_metadata(view.join("skins")).await.unwrap();
+        assert!(skins.is_dir() && !skins.file_type().is_symlink());
+        polyio::write(view.join("skins/new.png"), b"png")
+            .await
+            .unwrap();
+        assert!(!shared.join("skins/new.png").exists());
+    }
+
     #[test]
     fn command_line_censors_a_token_that_is_not_a_jwt() {
         let mut command = std::process::Command::new("java");
@@ -1379,6 +1427,29 @@ impl ProtectedLaunch {
             state.security.keep_broker(cluster_id, running);
         }
     }
+}
+
+/// The game writes downloaded skins into `<assets>/skins`, but the shared
+/// assets folder is read-only in the sandbox. Each sandboxed instance gets
+/// its own assets folder instead: links to everything shared (nothing is
+/// copied) plus a real `skins` folder, so instances never share a writable
+/// cache
+async fn sandboxed_assets(cluster_dir: &Path, shared: &Path) -> LauncherResult<PathBuf> {
+    let view = cluster_dir.join(".oneclient").join("assets");
+    polyio::create_dir_all(view.join("skins")).await?;
+    let mut entries = polyio::read_dir(shared).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name();
+        if name == "skins" || !entry.file_type().await?.is_dir() {
+            continue;
+        }
+        let link = view.join(&name);
+        if polyio::symlink_metadata(&link).await.is_ok() {
+            continue;
+        }
+        polyio::symlink_dir(entry.path(), &link).await?;
+    }
+    Ok(view)
 }
 
 async fn protect_launch(
