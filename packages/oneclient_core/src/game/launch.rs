@@ -457,6 +457,13 @@ async fn start(
         java.major,
         runtime_has_module(&java.absolute_path, "jdk.incubator.vector"),
     )?;
+    if protected.sandbox.is_sandboxed() {
+        sandboxed_natives(
+            &mut jvm_args,
+            &natives,
+            &cluster.dir()?.join(".oneclient").join("natives"),
+        );
+    }
     jvm_args.splice(0..0, protected.jvm_arguments());
 
     let mods_dir = paths::cluster_mods_dir(&cluster.folder_name)?;
@@ -1353,7 +1360,47 @@ mod tests {
 
 #[cfg(test)]
 mod jvm_arg_tests {
-    use super::{jvm_args_with, release_lists};
+    use super::{jvm_args_with, release_lists, sandboxed_natives};
+
+    #[test]
+    fn sandboxed_games_unpack_natives_into_their_own_folder() {
+        let root = std::env::temp_dir().join(format!("oneclient-natives-{}", uuid::Uuid::new_v4()));
+        let shared = root.join("metadata").join("natives").join("26.3");
+        let legacy = root.join("metadata").join("natives").join("1.8.9");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("lwjgl64.dll"), b"").unwrap();
+        let private = root.join("instance").join(".oneclient").join("natives");
+
+        let mut args = vec![
+            format!("-Djava.library.path={}/java", shared.display()),
+            format!(
+                "-Dorg.lwjgl.system.SharedLibraryExtractPath={}/lwjgl",
+                shared.display()
+            ),
+            "-Djna.tmpdir=C:/elsewhere".to_string(),
+            "-Xmx2G".to_string(),
+        ];
+        sandboxed_natives(&mut args, &shared, &private);
+        assert_eq!(
+            args[0],
+            format!("-Djava.library.path={}", private.join("java").display())
+        );
+        assert_eq!(
+            args[1],
+            format!(
+                "-Dorg.lwjgl.system.SharedLibraryExtractPath={}",
+                private.join("lwjgl").display()
+            )
+        );
+        assert_eq!(args[2], "-Djna.tmpdir=C:/elsewhere");
+        assert_eq!(args[3], "-Xmx2G");
+
+        // natives the launcher unpacked stay put
+        let mut old = vec![format!("-Djava.library.path={}", legacy.display())];
+        sandboxed_natives(&mut old, &legacy, &private);
+        assert_eq!(old[0], format!("-Djava.library.path={}", legacy.display()));
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn the_vector_module_is_only_named_when_the_runtime_ships_it() {
@@ -1482,6 +1529,36 @@ impl ProtectedLaunch {
         if let Some(relay) = self.discord {
             state.security.keep_discord_relay(cluster_id, relay);
         }
+    }
+}
+
+/// The `-D` properties naming folders the game unpacks native libraries into
+const NATIVES_PROPERTIES: [&str; 4] = [
+    "-Djava.library.path=",
+    "-Djna.tmpdir=",
+    "-Dorg.lwjgl.system.SharedLibraryExtractPath=",
+    "-Dio.netty.native.workdir=",
+];
+
+/// Since 26.1 the game unpacks its own native libraries into folders under
+/// the shared natives folder, which the sandbox can only read. It has to stay
+/// that way: an instance that could write there could plant a DLL every other
+/// instance loads. Sandboxed games unpack into their own folder instead.
+/// Natives the launcher unpacked itself (older versions) stay where they are
+fn sandboxed_natives(args: &mut [String], shared: &Path, private: &Path) {
+    for arg in args.iter_mut() {
+        let Some(property) = NATIVES_PROPERTIES.iter().find(|p| arg.starts_with(**p)) else {
+            continue;
+        };
+        let value = PathBuf::from(&arg[property.len()..]);
+        let Ok(rest) = value.strip_prefix(shared) else {
+            continue;
+        };
+        let unpacked_by_launcher = std::fs::read_dir(&value).is_ok_and(|mut d| d.next().is_some());
+        if *property == "-Djava.library.path=" && unpacked_by_launcher {
+            continue;
+        }
+        *arg = format!("{property}{}", private.join(rest).display());
     }
 }
 
