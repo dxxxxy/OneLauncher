@@ -38,6 +38,7 @@ pub struct SecurityService {
     ui: parking_lot::RwLock<Option<Arc<dyn SecurityUi>>>,
     activity: parking_lot::Mutex<VecDeque<Activity>>,
     brokers: parking_lot::Mutex<HashMap<i64, RunningBroker>>,
+    discord_relays: parking_lot::Mutex<HashMap<i64, oneclient_broker::DiscordRelay>>,
     protection: parking_lot::Mutex<HashMap<i64, oneclient_sandbox::Protection>>,
     denied_seen: parking_lot::Mutex<std::collections::HashSet<(i64, String)>>,
 }
@@ -173,8 +174,18 @@ impl SecurityService {
         self.brokers.lock().insert(cluster_id, broker);
     }
 
+    pub(crate) fn keep_discord_relay(
+        &self,
+        cluster_id: i64,
+        relay: oneclient_broker::DiscordRelay,
+    ) {
+        self.discord_relays.lock().insert(cluster_id, relay);
+    }
+
+    /// When the game exits: its broker and Discord relay go with it
     pub(crate) fn drop_broker(&self, cluster_id: i64) {
         self.brokers.lock().remove(&cluster_id);
+        self.discord_relays.lock().remove(&cluster_id);
         if let Ok(path) = session_file(cluster_id) {
             let _ = std::fs::remove_file(path);
         }

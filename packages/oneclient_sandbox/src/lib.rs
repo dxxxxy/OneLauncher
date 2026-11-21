@@ -62,6 +62,9 @@ pub struct SandboxPolicy {
     /// Windows: let the game reach servers on this machine (needs a one-time
     /// admin prompt). Elsewhere loopback always works
     pub localhost: bool,
+    /// Unix: the launcher's Discord relay socket, shown to the game where
+    /// Discord's own would be. Discord's real socket stays out of reach
+    pub discord_socket: Option<PathBuf>,
 }
 
 /// How well the sandbox protects this launch, for the badge in the UI

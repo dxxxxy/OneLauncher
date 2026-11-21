@@ -154,6 +154,11 @@ impl Plan {
             if let Some(runtime_dir) = &runtime_dir {
                 args.push("--dir".into());
                 args.push(runtime_dir.clone().into());
+                if let Some(relay) = &policy.discord_socket {
+                    args.push("--bind".into());
+                    args.push(relay.clone().into());
+                    args.push(runtime_dir.join("discord-ipc-0").into());
+                }
                 if let Some(wayland) = std::env::var_os("WAYLAND_DISPLAY") {
                     bind(&mut args, "--ro-bind-try", &runtime_dir.join(wayland));
                 }

@@ -48,6 +48,17 @@ pub(crate) fn profile(policy: &SandboxPolicy, home: &Path) -> String {
             quote(dir)
         ));
     }
+    // Discord only through the launcher's relay, which passes rich presence
+    // and refuses account access
+    p.push_str(
+        "(deny network-outbound (remote unix-socket (path-regex #\"/discord-ipc-[0-9]+$\")))\n",
+    );
+    if let Some(relay) = &policy.discord_socket {
+        p.push_str(&format!(
+            "(allow network-outbound (remote unix-socket (path-literal {})))\n",
+            quote(relay)
+        ));
+    }
     // other apps: no scripting them, no asking the keychain
     p.push_str("(deny appleevent-send)\n");
     p.push_str("(deny mach-lookup (global-name \"com.apple.SecurityServer\"))\n");
@@ -113,5 +124,8 @@ mod tests {
         let allow = p.find("instance \\\"x\\\"").unwrap();
         assert!(deny < allow);
         assert!(p.contains("(deny device-microphone)"));
+        assert!(p.contains(
+            "(deny network-outbound (remote unix-socket (path-regex #\"/discord-ipc-[0-9]+$\")))"
+        ));
     }
 }

@@ -1371,6 +1371,8 @@ struct ProtectedLaunch {
         oneclient_broker::RunningBroker,
         PathBuf,
     )>,
+    /// Rich presence for sandboxed games, which can't reach Discord
+    discord: Option<oneclient_broker::DiscordRelay>,
     game_token: String,
     home: PathBuf,
     temp: PathBuf,
@@ -1394,6 +1396,9 @@ impl ProtectedLaunch {
                 "-XX:-UsePerfData".to_string(),
             ]);
         }
+        if let Some(property) = self.discord.as_ref().and_then(|r| r.jvm_property()) {
+            args.push(property);
+        }
         args
     }
 
@@ -1415,6 +1420,12 @@ impl ProtectedLaunch {
                 .env("XDG_CONFIG_HOME", self.home.join(".config"))
                 .env("XDG_DATA_HOME", self.home.join(".local").join("share"))
                 .env("XDG_CACHE_HOME", self.home.join(".cache"));
+            // Discord libraries look for the socket in TMPDIR on macOS, and
+            // the instance's temp path is too long for a socket
+            #[cfg(target_os = "macos")]
+            if let Some(dir) = self.discord.as_ref().and_then(|r| r.path().parent()) {
+                command.env("TMPDIR", dir);
+            }
         }
     }
 
@@ -1426,7 +1437,30 @@ impl ProtectedLaunch {
         if let Some((_, running, _)) = self.broker {
             state.security.keep_broker(cluster_id, running);
         }
+        if let Some(relay) = self.discord {
+            state.security.keep_discord_relay(cluster_id, relay);
+        }
     }
+}
+
+/// Starts the Discord relay in a short private directory: socket paths are
+/// limited to about 100 bytes. Linux shows it inside the sandbox at
+/// `$XDG_RUNTIME_DIR/discord-ipc-0`; macOS points the game's `TMPDIR` at it
+#[cfg(unix)]
+fn start_discord_relay(
+    cluster_id: i64,
+    host: Arc<crate::security::LauncherBrokerHost>,
+) -> Option<oneclient_broker::DiscordRelay> {
+    let root = if cfg!(target_os = "macos") {
+        std::env::temp_dir()
+    } else {
+        PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?)
+    };
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let dir = root.join(format!("oneclient-discord-{}", &id[..12]));
+    oneclient_broker::DiscordRelay::start(cluster_id, host, dir)
+        .inspect_err(|err| tracing::warn!(cluster_id, "no Discord relay: {err}"))
+        .ok()
 }
 
 /// The game writes downloaded skins into `<assets>/skins`, but the shared
@@ -1467,6 +1501,25 @@ async fn protect_launch(
     let home = private.join("home");
     let temp = private.join("tmp");
     let metadata = paths::metadata_dir()?;
+    let host = |sandboxed| {
+        Arc::new(LauncherBrokerHost {
+            cluster_id: cluster.id,
+            cluster_name: cluster.name.clone(),
+            cluster_dir: cluster_dir.clone(),
+            sandboxed,
+            auth: Arc::clone(&state.auth),
+            events: state.services.events.clone(),
+            security: Arc::clone(&state.security),
+        })
+    };
+
+    // Unix: the relay socket has to exist before the sandbox is built around it
+    #[cfg(unix)]
+    let unix_discord = if settings.sandbox {
+        start_discord_relay(cluster.id, host(true))
+    } else {
+        None
+    };
 
     let sandbox = if settings.sandbox {
         let microphone = match settings.microphone {
@@ -1511,6 +1564,10 @@ async fn protect_launch(
             temp: temp.clone(),
             microphone,
             localhost: settings.localhost,
+            #[cfg(unix)]
+            discord_socket: unix_discord.as_ref().map(|r| r.path().to_path_buf()),
+            #[cfg(not(unix))]
+            discord_socket: None,
         };
         oneclient_sandbox::prepare(&policy)
             .await
@@ -1520,6 +1577,21 @@ async fn protect_launch(
     };
     tracing::info!(cluster_id = cluster.id, protection = ?sandbox.protection, "game protection");
 
+    #[cfg(unix)]
+    let discord = unix_discord.filter(|_| sandbox.is_sandboxed());
+    #[cfg(windows)]
+    let discord = if sandbox.is_sandboxed() {
+        oneclient_broker::DiscordRelay::start(
+            cluster.id,
+            host(true),
+            sandbox.app_container_sid.as_deref(),
+        )
+        .inspect_err(|err| tracing::warn!(cluster_id = cluster.id, "no Discord relay: {err}"))
+        .ok()
+    } else {
+        None
+    };
+
     let broker = if account.is_microsoft() && !account.access_token.is_empty() {
         let descriptor = oneclient_broker::LaunchDescriptor::new(
             cluster.id,
@@ -1528,15 +1600,7 @@ async fn protect_launch(
             sandbox.app_container_sid.clone(),
             cfg!(unix).then(|| private.join("broker")),
         );
-        let host = Arc::new(LauncherBrokerHost {
-            cluster_id: cluster.id,
-            cluster_name: cluster.name.clone(),
-            cluster_dir: cluster_dir.clone(),
-            sandboxed: sandbox.is_sandboxed(),
-            auth: Arc::clone(&state.auth),
-            events: state.services.events.clone(),
-            security: Arc::clone(&state.security),
-        });
+        let host = host(sandbox.is_sandboxed());
         let running =
             oneclient_broker::start(&descriptor, host, state.services.requester.http().clone())
                 .map_err(|err| GameError::Broker(err.to_string()))?;
@@ -1564,6 +1628,7 @@ async fn protect_launch(
     Ok(ProtectedLaunch {
         sandbox,
         broker,
+        discord,
         game_token,
         home,
         temp,
