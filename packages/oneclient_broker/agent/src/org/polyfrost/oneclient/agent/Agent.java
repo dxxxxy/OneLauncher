@@ -19,6 +19,7 @@ public final class Agent {
         try {
             File self = new File(Agent.class.getProtectionDomain().getCodeSource().getLocation().toURI());
             inst.appendToBootstrapClassLoaderSearch(new JarFile(self));
+            exposeToFabric(self);
             Class.forName("org.polyfrost.oneclient.agent.boot.Main", true, null)
                     .getMethod("start", Instrumentation.class)
                     .invoke(null, inst);
@@ -26,6 +27,24 @@ public final class Agent {
             // never take the game down with us
             System.err.println("[OneClient agent] failed to start: " + t);
         }
+    }
+
+    /**
+     * Fabric's class loader only lets game code reach classes from jars on
+     * the class path it was started with, and this jar isn't on it: a patched
+     * mod or library class calling into the hooks would fail to link. Fabric
+     * reads this property when it starts, after every agent has run.
+     */
+    private static void exposeToFabric(File self) {
+        String key = "fabric.systemLibraries";
+        String jar;
+        try {
+            jar = self.getCanonicalPath();
+        } catch (Exception e) {
+            jar = self.getAbsolutePath();
+        }
+        String before = System.getProperty(key);
+        System.setProperty(key, before == null || before.isEmpty() ? jar : before + File.pathSeparator + jar);
     }
 
     public static void agentmain(String args, Instrumentation inst) {
