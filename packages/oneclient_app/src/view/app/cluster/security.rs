@@ -352,6 +352,16 @@ impl Component for SecuritySection {
                 .into_element()
         });
 
+        // ---- overlays: nothing to set, but users ask why Discord's is gone
+        let overlays_row = current.sandbox.then(|| {
+            settings_row(
+                IconType::LayersThree01,
+                t("oneclient.cluster.security.overlays.title"),
+                t("oneclient.cluster.security.overlays.description"),
+                rect(),
+            )
+        });
+
         // ---- activity
         let activity_row_header = settings_row(
             IconType::Eye,
@@ -390,6 +400,7 @@ impl Component for SecuritySection {
             .child(folders_row)
             .maybe_child(grants)
             .maybe_child(grant_error)
+            .maybe_child(overlays_row)
             .child(activity_row_header)
             .child(activity_list)
             .maybe_child(confirm_off)

@@ -2626,6 +2626,8 @@
   "oneclient.cluster.security.microphone.on": "Allowed",
   "oneclient.cluster.security.microphone.off": "Blocked",
   "oneclient.cluster.security.localhost.title": "Servers on This Computer",
+  "oneclient.cluster.security.overlays.description": "Overlays that record or draw on top of the game, like OBS game capture and Discord's newer overlay, still work. Discord's classic in-game overlay can't load here: it puts your Discord chat inside the game, where any mod could read it and type as you.",
+  "oneclient.cluster.security.overlays.title": "Overlays",
   "oneclient.cluster.security.localhost.description": "Lets the game connect to a server or proxy running on this computer. On Windows, allowing it asks for administrator approval once.",
   "oneclient.cluster.security.folders.title": "Shared Folders",
   "oneclient.cluster.security.folders.description": "Folders outside the instance that mods in it may read. Files you pick in a mod's file dialog are shared on their own and don't need this.",
