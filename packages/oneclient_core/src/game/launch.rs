@@ -1509,6 +1509,15 @@ impl ProtectedLaunch {
                 .env("XDG_CONFIG_HOME", self.home.join(".config"))
                 .env("XDG_DATA_HOME", self.home.join(".local").join("share"))
                 .env("XDG_CACHE_HOME", self.home.join(".cache"));
+            // NVIDIA's driver keeps compiled shaders under the real
+            // LocalAppData, which the sandbox can't write, so every launch
+            // compiled them all again; it only uses a folder that exists
+            if std::env::var_os("__GL_SHADER_DISK_CACHE_PATH").is_none() {
+                let shaders = self.home.join(".cache").join("nvidia");
+                if std::fs::create_dir_all(&shaders).is_ok() {
+                    command.env("__GL_SHADER_DISK_CACHE_PATH", shaders);
+                }
+            }
             // Discord libraries look for the socket in TMPDIR on macOS, and
             // the instance's temp path is too long for a socket
             #[cfg(target_os = "macos")]
