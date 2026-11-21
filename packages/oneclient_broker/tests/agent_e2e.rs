@@ -55,6 +55,29 @@ public class Probe {
             ? Runtime.getRuntime().exec(String.format("cmd.exe /C start \"Open file\" \"%s\"", folder))
             : Runtime.getRuntime().exec(new String[] {"/usr/bin/open", folder});
         System.out.println("folder=" + q.waitFor());
+
+        // Java 11's client, as newer mods use it
+        java.net.http.HttpResponse<String> r = java.net.http.HttpClient.newHttpClient().send(
+            java.net.http.HttpRequest.newBuilder(URI.create(
+                "https://api.minecraftservices.com/minecraft/profile/skins/active"))
+                .header("Authorization", "Bearer " + args[0])
+                .DELETE().build(),
+            java.net.http.HttpResponse.BodyHandlers.ofString());
+        System.out.println("modern=" + r.statusCode());
+        int async = java.net.http.HttpClient.newHttpClient().sendAsync(
+            java.net.http.HttpRequest.newBuilder(URI.create(
+                "https://api.minecraftservices.com/minecraft/profile/name/Async"))
+                .PUT(java.net.http.HttpRequest.BodyPublishers.ofString("{}")).build(),
+            java.net.http.HttpResponse.BodyHandlers.ofByteArray()).get().statusCode();
+        System.out.println("async=" + async);
+
+        // jagrosh-style Discord IPC: the pipe opened as a file
+        if (System.getProperty("os.name").startsWith("Windows")) {
+            java.io.RandomAccessFile pipe = new java.io.RandomAccessFile("\\\\?\\pipe\\discord-ipc-0", "rw");
+            pipe.write("hello".getBytes("UTF-8"));
+            System.out.println("discord=" + (char) pipe.read());
+            pipe.close();
+        }
     }
 }
 "#;
@@ -93,6 +116,25 @@ async fn the_agent_routes_account_requests_through_the_broker() {
         None,
         Some(dir.join("run")),
     );
+    // stands in for the launcher's Discord relay
+    #[cfg(windows)]
+    let discord_pipe = format!(r"\\.\pipe\oneclient-test-discord-{}", Uuid::new_v4().simple());
+    #[cfg(windows)]
+    let discord = {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut server = tokio::net::windows::named_pipe::ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&discord_pipe)
+            .unwrap();
+        tokio::spawn(async move {
+            server.connect().await.unwrap();
+            let mut hello = [0u8; 5];
+            server.read_exact(&mut hello).await.unwrap();
+            server.write_all(b"k").await.unwrap();
+            hello
+        })
+    };
+
     let host = Arc::new(Host::default());
     let broker =
         oneclient_broker::start(&descriptor, host.clone(), reqwest::Client::new()).unwrap();
@@ -100,7 +142,10 @@ async fn the_agent_routes_account_requests_through_the_broker() {
     let mut command = tokio::process::Command::new(&java);
     command
         .args(oneclient_broker::agent::jvm_arguments(&jar, &broker))
-        .arg("-Doneclient.sandboxed=true")
+        .arg("-Doneclient.sandboxed=true");
+    #[cfg(windows)]
+    command.arg(format!("-Doneclient.discord={discord_pipe}"));
+    command
         .arg(dir.join("Probe.java"))
         .arg(&descriptor.fake_token)
         .arg(&packs)
@@ -117,7 +162,11 @@ async fn the_agent_routes_account_requests_through_the_broker() {
         stdout.contains("status=403"),
         "stdout: {stdout}\nstderr: {stderr}"
     );
-    for line in ["opened=0", "folder=0"] {
+    let mut expected = vec!["opened=0", "folder=0", "modern=403", "async=403"];
+    if cfg!(windows) {
+        expected.push("discord=k");
+    }
+    for line in expected {
         assert!(
             stdout.contains(line),
             "stdout: {stdout}\nstderr: {stderr}"
@@ -130,7 +179,9 @@ async fn the_agent_routes_account_requests_through_the_broker() {
             .any(|a| matches!(a.kind, ActivityKind::Connected { .. })),
         "{log:?}"
     );
-    assert!(log.iter().any(Activity::is_alarm), "{log:?}");
+    assert_eq!(log.iter().filter(|a| a.is_alarm()).count(), 3, "{log:?}");
+    #[cfg(windows)]
+    assert_eq!(&discord.await.unwrap(), b"hello");
     assert_eq!(
         host.opened.lock().unwrap().as_slice(),
         &[

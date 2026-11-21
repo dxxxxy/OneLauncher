@@ -10,7 +10,11 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import org.polyfrost.oneclient.agent.boot.Patcher.Kind;
 import org.polyfrost.oneclient.agent.boot.Patcher.Target;
 
-/** Patches the handful of methods that need the launcher when sandboxed. */
+/**
+ * Patches the handful of JDK and library methods that need the launcher:
+ * account requests through {@code java.net.http} always, and the rest only
+ * when sandboxed.
+ */
 final class Transformer implements ClassFileTransformer {
     private static final List<Target> PROCESS_BUILDER = Arrays.asList(
             new Target("start", "()Ljava/lang/Process;", false, 1, "start", Kind.OBJECT, "java/lang/Process"));
@@ -33,6 +37,22 @@ final class Transformer implements ClassFileTransformer {
             new Target("tinyfd_selectFolderDialog", ")Ljava/lang/String;", true, 1, "tinyFolder", Kind.OBJECT,
                     "java/lang/String"));
 
+    private static final List<Target> RANDOM_ACCESS_FILE = Arrays.asList(
+            new Target("<init>", "(Ljava/io/File;Ljava/lang/String;)V", false, 1, "discordPipe", Kind.REWRITE,
+                    "java/io/File"),
+            new Target("<init>", "(Ljava/lang/String;Ljava/lang/String;)V", false, 1, "discordPipeName",
+                    Kind.REWRITE, "java/lang/String"));
+
+    private static final List<Target> HTTP_CLIENT = Arrays.asList(
+            new Target("send", "(Ljava/net/http/HttpRequest;Ljava/net/http/HttpResponse$BodyHandler;)"
+                    + "Ljava/net/http/HttpResponse;", false, 3, "httpSend", Kind.OBJECT, "java/net/http/HttpResponse"),
+            new Target("sendAsync", "(Ljava/net/http/HttpRequest;Ljava/net/http/HttpResponse$BodyHandler;)"
+                    + "Ljava/util/concurrent/CompletableFuture;", false, 3, "httpSendAsync", Kind.OBJECT,
+                    "java/util/concurrent/CompletableFuture"),
+            new Target("sendAsync", "(Ljava/net/http/HttpRequest;Ljava/net/http/HttpResponse$BodyHandler;"
+                    + "Ljava/net/http/HttpResponse$PushPromiseHandler;)Ljava/util/concurrent/CompletableFuture;",
+                    false, 3, "httpSendAsync", Kind.OBJECT, "java/util/concurrent/CompletableFuture"));
+
     /** Patched classes outside the JDK that may live in a named module. */
     private static final ConcurrentLinkedQueue<Object[]> toFix = new ConcurrentLinkedQueue<Object[]>();
 
@@ -41,6 +61,13 @@ final class Transformer implements ClassFileTransformer {
         if (name == null) return null;
         try {
             List<Target> targets;
+            if (name.equals("jdk/internal/net/http/HttpClientFacade")) {
+                return Patcher.patch(bytes, HTTP_CLIENT);
+            }
+            if (!Hooks.sandboxed) return null;
+            if (name.equals("java/io/RandomAccessFile")) {
+                return Hooks.discordRelay == null ? null : Patcher.patch(bytes, RANDOM_ACCESS_FILE);
+            }
             if (name.equals("java/lang/ProcessBuilder")) targets = PROCESS_BUILDER;
             else if (name.equals("java/awt/Desktop")) targets = DESKTOP;
             else if (name.equals("javax/swing/JFileChooser")) targets = CHOOSER;

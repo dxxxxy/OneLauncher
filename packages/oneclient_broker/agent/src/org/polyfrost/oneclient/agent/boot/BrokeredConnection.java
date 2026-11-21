@@ -2,7 +2,6 @@ package org.polyfrost.oneclient.agent.boot;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
-import java.io.DataOutputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
@@ -95,34 +94,16 @@ final class BrokeredConnection extends HttpsURLConnection {
         if (answered) return;
         answered = true;
         connected = true;
-        final String caller = Bridge.caller();
-        final byte[] body = requestBody == null ? new byte[0] : requestBody.toByteArray();
-        Bridge.Reply reply = Bridge.INSTANCE.call(Bridge.HTTP, new Bridge.Body() {
-            public void write(DataOutputStream out) throws IOException {
-                Bridge.writeString(out, method);
-                Bridge.writeString(out, url.toExternalForm());
-                int count = 0;
-                for (List<String> values : requestHeaders.values()) count += values.size();
-                out.writeShort(count);
-                for (Map.Entry<String, List<String>> entry : requestHeaders.entrySet()) {
-                    for (String value : entry.getValue()) {
-                        Bridge.writeString(out, entry.getKey());
-                        Bridge.writeString(out, value);
-                    }
-                }
-                Bridge.writeBytes(out, body);
-                Bridge.writeString(out, caller);
-            }
-        }, Math.max(getReadTimeout(), 30000));
-
-        if (reply.kind == Bridge.HTTP_REPLY) {
-            status = reply.body.readUnsignedShort();
-            responseHeaders.addAll(Bridge.readHeaders(reply.body));
-            responseBody = Bridge.readBytes(reply.body);
-        } else {
-            String error = reply.error();
-            throw new IOException(error != null ? error : "OneClient could not complete the request");
+        byte[] body = requestBody == null ? new byte[0] : requestBody.toByteArray();
+        List<String[]> headers = new ArrayList<String[]>();
+        for (Map.Entry<String, List<String>> entry : requestHeaders.entrySet()) {
+            for (String value : entry.getValue()) headers.add(new String[] {entry.getKey(), value});
         }
+        Exchange.Response response =
+                Exchange.send(method, url.toExternalForm(), headers, body, Bridge.caller(), getReadTimeout());
+        status = response.status;
+        responseHeaders.addAll(response.headers);
+        responseBody = response.body;
     }
 
     @Override

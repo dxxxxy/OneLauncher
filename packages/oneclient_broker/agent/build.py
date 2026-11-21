@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds oneclient-agent.jar from src/ with javac.
+"""Builds oneclient-agent.jar from src/ (Java 8) and src11/ (Java 11) with javac.
 
 The jar is committed and embedded into the launcher with include_bytes!, so
 building the launcher never needs a JDK. Entries are sorted and timestamped
@@ -19,6 +19,7 @@ import zipfile
 
 HERE = pathlib.Path(__file__).resolve().parent
 SRC = HERE / "src"
+SRC11 = HERE / "src11"
 JAR = HERE / "oneclient-agent.jar"
 
 MANIFEST = (
@@ -38,6 +39,13 @@ def build() -> bytes:
         subprocess.run(
             ["javac", "--release", "8", "-Xlint:-options", "-g:source,lines",
              "-encoding", "UTF-8", "-d", str(out), *sources],
+            check=True,
+        )
+        # Java 11+ only parts (java.net.http), loaded by name when present
+        modern = sorted(str(p) for p in SRC11.rglob("*.java"))
+        subprocess.run(
+            ["javac", "--release", "11", "-g:source,lines", "-encoding", "UTF-8",
+             "-cp", str(out), "-d", str(out), *modern],
             check=True,
         )
         jar_path = pathlib.Path(tmp) / "agent.jar"

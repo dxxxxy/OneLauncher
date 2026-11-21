@@ -23,7 +23,10 @@ public final class Handlers {
     private Handlers() {}
 
     static boolean brokered(URL url) {
-        String host = url.getHost();
+        return brokeredHost(url.getHost());
+    }
+
+    static boolean brokeredHost(String host) {
         if (host == null) return false;
         host = host.toLowerCase(java.util.Locale.ROOT);
         for (String b : BROKERED) {

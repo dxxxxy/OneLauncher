@@ -18,6 +18,8 @@ public final class Main {
     public static void start(Instrumentation inst) {
         instrumentation = inst;
         Hooks.sandboxed = Boolean.getBoolean("oneclient.sandboxed");
+        String discord = System.getProperty("oneclient.discord");
+        if (discord != null && !discord.isEmpty()) Hooks.discordRelay = discord;
 
         openModules(inst);
 
@@ -28,10 +30,10 @@ public final class Main {
             System.setProperty("java.protocol.handler.pkgs", HANDLER_PACKAGE + "|" + existing);
         }
 
+        inst.addTransformer(new Transformer(), true);
         if (Hooks.sandboxed) {
-            Transformer transformer = new Transformer();
-            inst.addTransformer(transformer, true);
-            retransformLoaded(inst, "java.lang.ProcessBuilder", "java.awt.Desktop", "javax.swing.JFileChooser");
+            retransformLoaded(inst, "java.lang.ProcessBuilder", "java.awt.Desktop", "javax.swing.JFileChooser",
+                    "java.io.RandomAccessFile");
             Transformer.startModuleFixer();
         }
 
@@ -65,9 +67,11 @@ public final class Main {
             exports.put("sun.net.www.protocol.http", Collections.singleton(ours));
             exports.put("sun.net.www.protocol.https", Collections.singleton(ours));
             redefine(inst, base, ours, exports);
-            for (String name : new String[] {"java.awt.Desktop", "javax.swing.JFileChooser"}) {
+            // java.net.http belongs to the platform loader, not the boot one
+            ClassLoader platform = ClassLoader.getSystemClassLoader();
+            for (String name : new String[] {"java.awt.Desktop", "javax.swing.JFileChooser", "java.net.http.HttpClient"}) {
                 try {
-                    redefine(inst, getModule.invoke(Class.forName(name, false, null)), ours,
+                    redefine(inst, getModule.invoke(Class.forName(name, false, platform)), ours,
                             Collections.<String, Set<Object>>emptyMap());
                 } catch (Throwable ignored) {
                     // headless or stripped runtime

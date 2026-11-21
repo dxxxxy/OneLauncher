@@ -18,8 +18,77 @@ public final class Hooks {
     public static final Object PASS = new Object();
 
     static volatile boolean sandboxed;
+    /** Windows: the launcher's Discord relay pipe, from {@code -Doneclient.discord} */
+    static volatile String discordRelay;
 
     private Hooks() {}
+
+    // ---- java.io.RandomAccessFile(File, String): Discord IPC
+
+    /**
+     * Java Discord IPC libraries open {@code \\?\pipe\discord-ipc-N} as a file.
+     * The sandbox can't reach Discord's own pipe, so they get the launcher's
+     * relay instead, which passes on rich presence and nothing else. Runs on
+     * every RandomAccessFile, so it stays cheap and never throws.
+     */
+    public static Object discordPipe(Object file) {
+        String relay = discordRelay;
+        if (relay == null || !(file instanceof File) || !isDiscordPipe(((File) file).getPath())) return file;
+        return new File(relay);
+    }
+
+    /** The same for {@code RandomAccessFile(String, String)}, before File reshapes the name. */
+    public static Object discordPipeName(Object name) {
+        String relay = discordRelay;
+        if (relay == null || !(name instanceof String) || !isDiscordPipe((String) name)) return name;
+        return relay;
+    }
+
+    static boolean isDiscordPipe(String path) {
+        int prefix = 21; // \\?\pipe\discord-ipc-
+        if (path.length() <= prefix || path.length() > prefix + 2) return false;
+        String head = path.substring(0, prefix).toLowerCase(Locale.ROOT).replace('/', '\\');
+        if (!head.equals("\\\\?\\pipe\\discord-ipc-") && !head.equals("\\\\.\\pipe\\discord-ipc-")) return false;
+        for (int i = prefix; i < path.length(); i++) {
+            if (!Character.isDigit(path.charAt(i))) return false;
+        }
+        return true;
+    }
+
+    // ---- java.net.http (Java 11+)
+
+    private static volatile HttpRelay modern;
+    private static volatile boolean modernLoaded;
+
+    /** {@code client} is the JDK's own client; its loader can see {@code java.net.http}. */
+    private static HttpRelay modern(Object client) {
+        if (!modernLoaded) {
+            synchronized (Hooks.class) {
+                if (!modernLoaded) {
+                    try {
+                        ClassLoader loader = new ModuleLoader(client.getClass().getClassLoader(),
+                                "org.polyfrost.oneclient.agent.http");
+                        modern = (HttpRelay) Class.forName("org.polyfrost.oneclient.agent.http.ModernHttp", true, loader)
+                                .getConstructor().newInstance();
+                    } catch (Throwable t) {
+                        Main.log("java.net.http requests can't reach OneClient: " + t);
+                    }
+                    modernLoaded = true;
+                }
+            }
+        }
+        return modern;
+    }
+
+    public static Object httpSend(Object client, Object request, Object handler) throws Exception {
+        HttpRelay relay = modern(client);
+        return relay == null ? PASS : relay.send(request, handler);
+    }
+
+    public static Object httpSendAsync(Object client, Object request, Object handler) {
+        HttpRelay relay = modern(client);
+        return relay == null ? PASS : relay.sendAsync(request, handler);
+    }
 
     private static boolean open(final String target) {
         if (target == null || target.isEmpty()) return false;

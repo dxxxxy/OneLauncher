@@ -22,22 +22,27 @@ import java.util.List;
  * OBJECT:    load*; invokestatic hook(..)Object; dup; getstatic PASS;
  *            if_acmpeq L; checkcast T; areturn;                         L: pop; nop*
  * INT:       ... if_acmpeq L; checkcast Integer; invokevirtual intValue; ireturn; L: pop; nop*
+ * REWRITE:   aload n; invokestatic hook(Object)Object; checkcast T; astore n; nop*
  * </pre>
  *
- * The prologue is padded to a multiple of 4 bytes so tableswitch and
+ * REWRITE replaces argument {@code n} and then runs the original code, so it
+ * also works on constructors.
+ *
+ * <p>The prologue is padded to a multiple of 4 bytes so tableswitch and
  * lookupswitch alignment in the original code is unchanged. Branch offsets in
  * the original are relative and need no change; the exception table, line
  * and local-variable tables shift by the prologue length, and one stack map
- * frame is inserted for {@code L}.
+ * frame is inserted for {@code L} (REWRITE has no branch and needs none).
  */
 final class Patcher {
-    enum Kind { VOID_BOOL, OBJECT, INT }
+    enum Kind { VOID_BOOL, OBJECT, INT, REWRITE }
 
     static final class Target {
         final String name;
         /** Exact descriptor, or a suffix when {@code suffix} is set. */
         final String desc;
         final boolean suffix;
+        /** Reference locals passed to the hook; for REWRITE, the one local replaced */
         final int loads;
         final String hook;
         final String hookDesc;
@@ -53,7 +58,8 @@ final class Patcher {
             this.kind = kind;
             this.cast = cast;
             StringBuilder d = new StringBuilder("(");
-            for (int i = 0; i < loads; i++) d.append("Ljava/lang/Object;");
+            int passed = kind == Kind.REWRITE ? 1 : loads;
+            for (int i = 0; i < passed; i++) d.append("Ljava/lang/Object;");
             d.append(kind == Kind.VOID_BOOL ? ")Z" : ")Ljava/lang/Object;");
             this.hookDesc = d.toString();
         }
@@ -210,7 +216,7 @@ final class Patcher {
             String n = utf8At(name);
             String d = utf8At(desc);
             for (Target target : targets) {
-                if (!target.matches(n, d) || n.equals("<init>")) continue;
+                if (!target.matches(n, d) || (n.equals("<init>") && target.kind != Kind.REWRITE)) continue;
                 for (Attribute a : attributes) {
                     if (utf8At(a.name).equals("Code")) {
                         a.data = patchCode(a.data, target);
@@ -257,7 +263,7 @@ final class Patcher {
         // ---- prologue
         ByteArrayOutputStream p = new ByteArrayOutputStream();
         DataOutputStream pro = new DataOutputStream(p);
-        for (int i = 0; i < target.loads; i++) {
+        for (int i = 0; i < target.loads && target.kind != Kind.REWRITE; i++) {
             if (i <= 3) {
                 pro.writeByte(0x2a + i); // aload_<i>
             } else {
@@ -268,7 +274,17 @@ final class Patcher {
         pro.writeByte(0xb8); // invokestatic
         pro.writeShort(member(10, HOOKS, target.hook, target.hookDesc));
         int label;
-        if (target.kind == Kind.VOID_BOOL) {
+        if (target.kind == Kind.REWRITE) {
+            // the argument goes in before the call, comes back cast to its type
+            byte[] call = p.toByteArray();
+            p.reset();
+            local(pro, 0x19, 0x2a, target.loads);
+            pro.write(call);
+            pro.writeByte(0xc0); // checkcast
+            pro.writeShort(classRef(target.cast));
+            local(pro, 0x3a, 0x4b, target.loads);
+            label = -1;
+        } else if (target.kind == Kind.VOID_BOOL) {
             pro.writeByte(0x99); // ifeq
             pro.writeShort(4);
             pro.writeByte(0xb1); // return
@@ -313,13 +329,14 @@ final class Patcher {
                 shiftEntries(a.data, 10, 0, shift);
             } else if (n.equals("StackMapTable")) {
                 stackMapName = a.name;
-                a.data = shiftFrames(a.data, target.kind, label, shift);
+                a.data = target.kind == Kind.REWRITE ? shiftFirstFrame(a.data, shift)
+                        : shiftFrames(a.data, target.kind, label, shift);
             } else if (n.startsWith("Runtime") && n.endsWith("TypeAnnotations")) {
                 continue; // carry code offsets we don't rewrite; optional
             }
             kept.add(a);
         }
-        if (stackMapName < 0 && major >= 50) {
+        if (stackMapName < 0 && major >= 50 && target.kind != Kind.REWRITE) {
             Attribute a = new Attribute();
             a.name = utf8("StackMapTable");
             a.data = shiftFrames(new byte[] {0, 0}, target.kind, label, shift);
@@ -340,6 +357,56 @@ final class Patcher {
         writeAttributes(out, kept);
         out.flush();
         return result.toByteArray();
+    }
+
+    /** {@code aload n} / {@code astore n}, short forms for 0-3 */
+    private static void local(DataOutputStream out, int wide, int shortBase, int index) throws IOException {
+        if (index <= 3) {
+            out.writeByte(shortBase + index);
+        } else {
+            out.writeByte(wide);
+            out.writeByte(index);
+        }
+    }
+
+    /**
+     * A prologue with no branch needs no frame of its own; the first original
+     * frame just moves by the prologue length.
+     */
+    private static byte[] shiftFirstFrame(byte[] data, int shift) throws IOException {
+        int count = ((data[0] & 0xff) << 8) | (data[1] & 0xff);
+        if (count == 0) return data;
+        ByteArrayOutputStream b = new ByteArrayOutputStream(data.length + 2);
+        DataOutputStream out = new DataOutputStream(b);
+        out.writeShort(count);
+        int tag = data[2] & 0xff;
+        if (tag <= 63) {
+            int moved = tag + shift;
+            if (moved <= 63) {
+                out.writeByte(moved);
+            } else {
+                out.writeByte(251);
+                out.writeShort(moved);
+            }
+            out.write(data, 3, data.length - 3);
+        } else if (tag <= 127) {
+            int moved = tag - 64 + shift;
+            if (moved <= 63) {
+                out.writeByte(64 + moved);
+            } else {
+                out.writeByte(247);
+                out.writeShort(moved);
+            }
+            out.write(data, 3, data.length - 3);
+        } else if (tag >= 247) {
+            out.writeByte(tag);
+            out.writeShort((((data[3] & 0xff) << 8) | (data[4] & 0xff)) + shift);
+            out.write(data, 5, data.length - 5);
+        } else {
+            throw new IOException("reserved stack map frame type " + tag);
+        }
+        out.flush();
+        return b.toByteArray();
     }
 
     /** Adds {@code shift} to the u2 at {@code offset} of each fixed-size entry after a u2 count. */
