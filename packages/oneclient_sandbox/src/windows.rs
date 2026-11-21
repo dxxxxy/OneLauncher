@@ -955,6 +955,17 @@ fn resolve_program(program: &Path, env: &[(OsString, OsString)]) -> PathBuf {
     program.to_path_buf()
 }
 
+/// What a container for this policy reports, without making one
+pub(crate) fn expected(localhost: bool) -> Protection {
+    if localhost {
+        Protection::Partial(vec![
+            "This instance can reach servers running on this computer".into(),
+        ])
+    } else {
+        Protection::Full
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -984,16 +995,5 @@ mod tests {
     fn environment_blocks_are_sorted_and_double_terminated() {
         let block = environment_block(&[("b".into(), "2".into()), ("A".into(), "1".into())]);
         assert_eq!(String::from_utf16_lossy(&block), "A=1\0b=2\0\0");
-    }
-}
-
-/// What a container for this policy reports, without making one
-pub(crate) fn expected(localhost: bool) -> Protection {
-    if localhost {
-        Protection::Partial(vec![
-            "This instance can reach servers running on this computer".into(),
-        ])
-    } else {
-        Protection::Full
     }
 }

@@ -223,10 +223,11 @@ impl Shared {
                 allow: "Allow".into(),
             })
             .await;
-        if allowed && change.kind.remembered() {
-            if let Ok(mut a) = self.allowed.lock() {
-                a.insert(change.kind, Instant::now());
-            }
+        if allowed
+            && change.kind.remembered()
+            && let Ok(mut a) = self.allowed.lock()
+        {
+            a.insert(change.kind, Instant::now());
         }
         allowed
     }

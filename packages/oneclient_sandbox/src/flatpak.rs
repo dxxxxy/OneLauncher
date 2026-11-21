@@ -13,6 +13,7 @@ use std::path::Path;
 use crate::SandboxPolicy;
 
 /// Reported with every Flatpak launch
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) const GAP: &str = "Inside Flatpak the game runs in a sub-sandbox that shares OneClient's display and sound access";
 
 /// `flatpak-spawn` options for one launch, ending before the program
