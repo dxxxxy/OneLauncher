@@ -60,8 +60,7 @@ pub(crate) fn profile(policy: &SandboxPolicy, home: &Path) -> String {
         ));
     }
     if policy.offline {
-        p.push_str("(deny network*)
-");
+        p.push_str("(deny network*)\n");
     }
     // other apps: no scripting them, no asking the keychain
     p.push_str("(deny appleevent-send)\n");
