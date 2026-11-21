@@ -108,6 +108,72 @@ public final class Hooks {
         }
     }
 
+    // ---- sun.nio.fs.WindowsFileSystemProvider#checkAccess
+
+    private static final ThreadLocal<Boolean> inCheckAccess = new ThreadLocal<Boolean>();
+
+    /**
+     * Java asks Windows whether a file is writable with AccessCheck on a
+     * security descriptor read without its integrity label, and Windows then
+     * assumes the default label: medium, no writing up. The sandbox runs at
+     * low integrity, so the answer is always no, even in the game's own folder.
+     * Files.isWritable fails everywhere (and File.canWrite on JetBrains
+     * Runtime), and JNA refuses to unpack itself. When that check refuses a
+     * write, this tries one instead: the file opened for writing, or a
+     * temporary file made and removed in a folder. The kernel's answer stands.
+     */
+    public static boolean checkAccess(Object provider, Object path, Object modes) throws java.io.IOException {
+        if (!sandboxed || inCheckAccess.get() != null) return false;
+        java.nio.file.AccessMode[] wanted = (java.nio.file.AccessMode[]) modes;
+        java.util.List<java.nio.file.AccessMode> others = new java.util.ArrayList<java.nio.file.AccessMode>();
+        boolean write = false;
+        for (java.nio.file.AccessMode mode : wanted) {
+            if (mode == java.nio.file.AccessMode.WRITE) write = true;
+            else others.add(mode);
+        }
+        if (!write) return false;
+        java.nio.file.spi.FileSystemProvider fs = (java.nio.file.spi.FileSystemProvider) provider;
+        java.nio.file.Path p = (java.nio.file.Path) path;
+        inCheckAccess.set(Boolean.TRUE);
+        try {
+            try {
+                fs.checkAccess(p, wanted);
+            } catch (java.nio.file.AccessDeniedException denied) {
+                fs.checkAccess(p, others.toArray(new java.nio.file.AccessMode[0]));
+                if (!canWrite(p)) throw denied;
+            }
+            return true;
+        } finally {
+            inCheckAccess.remove();
+        }
+    }
+
+    private static boolean canWrite(java.nio.file.Path p) throws java.io.IOException {
+        try {
+            java.nio.file.attribute.DosFileAttributes attributes =
+                    java.nio.file.Files.readAttributes(p, java.nio.file.attribute.DosFileAttributes.class);
+            if (attributes.isDirectory()) {
+                java.nio.file.Path probe = java.nio.file.Files.createTempFile(p, ".oneclient-", ".tmp");
+                try {
+                    java.nio.file.Files.delete(probe);
+                } catch (java.io.IOException leftBehind) {
+                    // could create but not delete: still writable
+                }
+            } else {
+                if (attributes.isReadOnly()) return false;
+                java.nio.channels.FileChannel.open(p, java.nio.file.StandardOpenOption.WRITE).close();
+            }
+            return true;
+        } catch (java.nio.file.AccessDeniedException denied) {
+            return false;
+        } catch (java.nio.file.NoSuchFileException gone) {
+            return false;
+        } catch (java.nio.file.FileSystemException inUse) {
+            // allowed, but another program holds the file open
+            return true;
+        }
+    }
+
     // ---- LWJGL 2 fullscreen (Windows)
 
     /**

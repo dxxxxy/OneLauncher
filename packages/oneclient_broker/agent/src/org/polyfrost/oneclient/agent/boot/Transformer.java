@@ -55,6 +55,10 @@ final class Transformer implements ClassFileTransformer {
             new Target("toRealPath", "([Ljava/nio/file/LinkOption;)Lsun/nio/fs/WindowsPath;", false, 2, "realPath",
                     Kind.OBJECT, "sun/nio/fs/WindowsPath"));
 
+    private static final List<Target> WINDOWS_PROVIDER = Arrays.asList(
+            new Target("checkAccess", "(Ljava/nio/file/Path;[Ljava/nio/file/AccessMode;)V", false, 3, "checkAccess",
+                    Kind.VOID_BOOL, null));
+
     private static final List<Target> HTTP_CLIENT = Arrays.asList(
             new Target("send", "(Ljava/net/http/HttpRequest;Ljava/net/http/HttpResponse$BodyHandler;)"
                     + "Ljava/net/http/HttpResponse;", false, 3, "httpSend", Kind.OBJECT, "java/net/http/HttpResponse"),
@@ -85,6 +89,7 @@ final class Transformer implements ClassFileTransformer {
             }
             if (name.equals("org/lwjgl/opengl/WindowsDisplay")) return Patcher.patch(bytes, LWJGL2_DISPLAY);
             if (name.equals("sun/nio/fs/WindowsPath")) return Patcher.patch(bytes, WINDOWS_PATH);
+            if (name.equals("sun/nio/fs/WindowsFileSystemProvider")) return Patcher.patch(bytes, WINDOWS_PROVIDER);
             if (name.equals("java/lang/ProcessBuilder")) targets = PROCESS_BUILDER;
             else if (name.equals("java/awt/Desktop")) targets = DESKTOP;
             else if (name.equals("javax/swing/JFileChooser")) targets = CHOOSER;

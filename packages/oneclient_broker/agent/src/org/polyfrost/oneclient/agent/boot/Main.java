@@ -33,7 +33,8 @@ public final class Main {
         inst.addTransformer(new Transformer(), true);
         if (Hooks.sandboxed) {
             retransformLoaded(inst, "java.lang.ProcessBuilder", "java.awt.Desktop", "javax.swing.JFileChooser",
-                    "java.io.RandomAccessFile", "java.io.File", "sun.nio.fs.WindowsPath");
+                    "java.io.RandomAccessFile", "java.io.File", "sun.nio.fs.WindowsPath",
+                    "sun.nio.fs.WindowsFileSystemProvider");
             Transformer.startModuleFixer();
         }
 
