@@ -485,6 +485,10 @@ impl Container {
         if policy.microphone {
             capabilities.push(Sid::capability("microphone")?);
         }
+        // what's playing and play/pause/skip (Evergreen HUD's music widget,
+        // Poly+'s pause screen): the media session manager refuses an
+        // AppContainer without it. It reads titles, not the user's files
+        capabilities.push(Sid::capability("globalMediaControl")?);
 
         if policy.localhost {
             exempt_loopback(&sid_string, &policy.home);
