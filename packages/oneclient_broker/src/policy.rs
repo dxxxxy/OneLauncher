@@ -187,6 +187,10 @@ pub fn decide(method: &str, url: &Url) -> Decision {
             "/privileges" if get => Decision::Allow(Plain(Bearer)),
             "/privacy/blocklist" if get => Decision::Allow(Plain(Bearer)),
             "/player/report" if post => Decision::Allow(Plain(Bearer)),
+            // 26.3's friends list: reading it, sending and answering friend
+            // requests, and showing friends what the player is doing
+            "/friends" if get || method == "PUT" => Decision::Allow(Plain(Bearer)),
+            "/presence" if post => Decision::Allow(Plain(Bearer)),
             "/publickeys" if get => Decision::Allow(Plain(Public)),
             "/minecraft/profile" if get => Decision::Allow(Plain(Bearer)),
             "/minecraft/profile/lookup/bulk/byname" if post => Decision::Allow(Plain(Public)),
@@ -338,6 +342,17 @@ mod tests {
             d("GET", "https://api.minecraftservices.com/minecraft/profile"),
             Decision::Allow(Route::Plain(TokenPlacement::Bearer))
         );
+        for (method, url) in [
+            ("GET", "https://api.minecraftservices.com/friends"),
+            ("PUT", "https://api.minecraftservices.com/friends"),
+            ("POST", "https://api.minecraftservices.com/presence"),
+        ] {
+            assert_eq!(
+                d(method, url),
+                Decision::Allow(Route::Plain(TokenPlacement::Bearer)),
+                "{method} {url}"
+            );
+        }
         assert_eq!(
             d("GET", "https://pc.realms.minecraft.net/worlds"),
             Decision::Allow(Route::Plain(TokenPlacement::RealmsCookie))
