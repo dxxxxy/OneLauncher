@@ -69,6 +69,17 @@ pub(crate) fn profile(policy: &SandboxPolicy, home: &Path) -> String {
     p
 }
 
+/// What [`Profile::build`] would report, without building anything
+pub(crate) fn expected() -> Protection {
+    if Path::new(SANDBOX_EXEC).exists() && std::env::var_os("HOME").is_some() {
+        Protection::Full
+    } else {
+        Protection::Off(MISSING.into())
+    }
+}
+
+const MISSING: &str = "sandbox-exec is missing on this Mac";
+
 impl Profile {
     pub(crate) fn build(policy: &SandboxPolicy) -> SandboxResult<Self> {
         if !Path::new(SANDBOX_EXEC).exists() {
@@ -88,7 +99,7 @@ impl Profile {
     pub(crate) fn protection(&self) -> Protection {
         match self.source {
             Some(_) => Protection::Full,
-            None => Protection::Off("sandbox-exec is missing on this Mac".into()),
+            None => Protection::Off(MISSING.into()),
         }
     }
 

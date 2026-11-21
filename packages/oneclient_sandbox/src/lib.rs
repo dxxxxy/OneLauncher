@@ -148,6 +148,27 @@ pub async fn prepare(policy: &SandboxPolicy) -> SandboxResult<Prepared> {
     Ok(unsandboxed("this system has no supported sandbox"))
 }
 
+/// The reason given when the user turned the sandbox off for an instance
+pub const SANDBOX_OFF: &str = "The sandbox is turned off for this instance";
+
+/// The protection a launch with these settings will get, for the UI before
+/// the game runs. [`prepare`] decides for real; this asks the same questions
+/// of the system without building a sandbox
+pub fn expected_protection(sandbox: bool, localhost: bool, microphone: bool) -> Protection {
+    let _ = (localhost, microphone);
+    if !sandbox {
+        return Protection::Off(SANDBOX_OFF.into());
+    }
+    #[cfg(windows)]
+    return windows::expected(localhost);
+    #[cfg(target_os = "macos")]
+    return macos::expected();
+    #[cfg(target_os = "linux")]
+    return linux::expected(microphone);
+    #[allow(unreachable_code)]
+    Protection::Off("this system has no supported sandbox".into())
+}
+
 /// For instances the user opted out of the sandbox
 pub fn unsandboxed(reason: impl Into<String>) -> Prepared {
     Prepared {
@@ -209,4 +230,25 @@ pub fn forget_instance(instance_id: i64) {
     windows::forget(instance_id);
     #[cfg(not(windows))]
     let _ = instance_id;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_prediction_follows_the_settings() {
+        assert_eq!(
+            expected_protection(false, false, false),
+            Protection::Off(SANDBOX_OFF.into())
+        );
+        #[cfg(windows)]
+        {
+            assert_eq!(expected_protection(true, false, false), Protection::Full);
+            assert!(matches!(
+                expected_protection(true, true, false),
+                Protection::Partial(gaps) if gaps.len() == 1
+            ));
+        }
+    }
 }

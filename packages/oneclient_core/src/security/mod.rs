@@ -249,11 +249,14 @@ pub(crate) struct SavedSession {
     /// Windows: the AppContainer allowed to open the relay
     #[serde(default)]
     pub app_container_sid: Option<String>,
+    /// How the sandbox protects the game, for the badge after a restart
+    #[serde(default)]
+    pub protection: Option<oneclient_sandbox::Protection>,
 }
 
 impl SavedSession {
     pub(crate) fn is_empty(&self) -> bool {
-        self.broker.is_none() && self.discord.is_none()
+        self.broker.is_none() && self.discord.is_none() && self.protection.is_none()
     }
 
     pub(crate) async fn save(&self, cluster_id: i64) -> Result<(), polyio::IOError> {
@@ -291,14 +294,21 @@ pub(crate) async fn resume_session(
     let Some(saved) = SavedSession::load(cluster.id).await else {
         return;
     };
+    if let Some(protection) = saved.protection.clone() {
+        state.security.set_protection(cluster.id, protection);
+    }
     let Ok(cluster_dir) = cluster.dir() else {
         return;
+    };
+    let sandboxed = match &saved.protection {
+        Some(protection) => protection.is_sandboxed(),
+        None => InstanceSecurity::load(cluster.id).await.sandbox,
     };
     let host = Arc::new(LauncherBrokerHost::new(
         state,
         cluster,
         cluster_dir,
-        InstanceSecurity::load(cluster.id).await.sandbox,
+        sandboxed,
     ));
     if let Some(descriptor) = &saved.broker {
         match oneclient_broker::start(
@@ -383,6 +393,34 @@ async fn append_to_disk(activity: Activity) {
 
 /// A voice chat mod in the instance means the game legitimately needs the
 /// microphone
+/// The protection to show for an instance: the running game's own, or what
+/// its next launch will get
+pub async fn shown_protection(
+    state: &crate::state::LauncherState,
+    cluster_id: i64,
+    folder_name: &str,
+) -> oneclient_sandbox::Protection {
+    if state.games.is_running(cluster_id)
+        && let Some(live) = state.security.protection(cluster_id)
+    {
+        return live;
+    }
+    let settings = InstanceSecurity::load(cluster_id).await;
+    let microphone = match settings.microphone {
+        Some(choice) => choice,
+        None => match paths::cluster_mods_dir(folder_name) {
+            Ok(mods) => has_voice_mod(&mods).await,
+            Err(_) => false,
+        },
+    };
+    // finding bubblewrap runs it once
+    tokio::task::spawn_blocking(move || {
+        oneclient_sandbox::expected_protection(settings.sandbox, settings.localhost, microphone)
+    })
+    .await
+    .unwrap_or_else(|_| oneclient_sandbox::Protection::Off(String::new()))
+}
+
 pub(crate) async fn has_voice_mod(mods_dir: &Path) -> bool {
     let Ok(mut entries) = polyio::read_dir(mods_dir).await else {
         return false;
@@ -438,11 +476,13 @@ mod tests {
             broker: None,
             discord: Some(r"\\.\pipe\oneclient-discord-1".into()),
             app_container_sid: Some("S-1-15-2-1".into()),
+            protection: Some(oneclient_sandbox::Protection::Partial(vec!["x".into()])),
         };
         let back = SavedSession::from_json(serde_json::to_value(&current).unwrap()).unwrap();
         assert!(back.broker.is_none());
         assert_eq!(back.discord, current.discord);
         assert_eq!(back.app_container_sid, current.app_container_sid);
+        assert_eq!(back.protection, current.protection);
     }
 
     #[test]

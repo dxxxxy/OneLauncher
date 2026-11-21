@@ -1692,7 +1692,7 @@ async fn protect_launch(
             .await
             .map_err(|err| GameError::Sandbox(err.to_string()))?
     } else {
-        oneclient_sandbox::unsandboxed("The sandbox is turned off for this instance")
+        oneclient_sandbox::unsandboxed(oneclient_sandbox::SANDBOX_OFF)
     };
     tracing::info!(cluster_id = cluster.id, protection = ?sandbox.protection, "game protection");
 
@@ -1732,6 +1732,7 @@ async fn protect_launch(
         broker: broker.as_ref().map(|(descriptor, _)| descriptor.clone()),
         discord: discord.as_ref().map(|relay| relay.path().to_path_buf()),
         app_container_sid: sandbox.app_container_sid.clone(),
+        protection: Some(sandbox.protection.clone()),
     };
     if !saved.is_empty() {
         saved

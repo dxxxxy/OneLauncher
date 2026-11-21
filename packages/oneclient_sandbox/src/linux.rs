@@ -32,6 +32,38 @@ pub(crate) enum Plan {
     Off(String),
 }
 
+const FLATPAK_OFF: &str = "Flatpak already confines OneClient; games share its permissions";
+const AUDIO_GAP: &str =
+    "Game audio goes through your sound server, which can't keep the microphone out on Linux";
+const X11_GAP: &str = "X11 lets any window read the keyboard and screen of others; use a Wayland session for full protection";
+const NO_BWRAP_GAP: &str = "bubblewrap isn't available, so the game can still reach the keyring and other apps through D-Bus; install bubblewrap for full protection";
+
+/// What [`Plan::build`] would report, without building anything
+pub(crate) fn expected(microphone: bool) -> Protection {
+    if std::env::var_os("FLATPAK_ID").is_some() {
+        return Protection::Off(FLATPAK_OFF.into());
+    }
+    if bwrap().is_none() {
+        return Protection::Partial(vec![NO_BWRAP_GAP.into()]);
+    }
+    let mut gaps = Vec::new();
+    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
+        let sound =
+            runtime_dir.join("pulse/native").exists() || runtime_dir.join("pipewire-0").exists();
+        if sound && !microphone {
+            gaps.push(AUDIO_GAP.into());
+        }
+    }
+    if std::env::var_os("DISPLAY").is_some() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        gaps.push(X11_GAP.into());
+    }
+    if gaps.is_empty() {
+        Protection::Full
+    } else {
+        Protection::Partial(gaps)
+    }
+}
+
 fn bwrap() -> Option<&'static PathBuf> {
     static FOUND: OnceLock<Option<PathBuf>> = OnceLock::new();
     FOUND
@@ -76,9 +108,7 @@ fn bind(args: &mut Vec<OsString>, kind: &str, path: &Path) {
 impl Plan {
     pub(crate) async fn build(policy: &SandboxPolicy) -> SandboxResult<Self> {
         if std::env::var_os("FLATPAK_ID").is_some() {
-            return Ok(Self::Off(
-                "Flatpak already confines OneClient; games share its permissions".into(),
-            ));
+            return Ok(Self::Off(FLATPAK_OFF.into()));
         }
 
         let mut read: Vec<PathBuf> = policy
@@ -175,10 +205,7 @@ impl Plan {
                     bind(&mut args, "--ro-bind-try", &pulse);
                     bind(&mut args, "--ro-bind-try", &pipewire);
                     if !policy.microphone {
-                        gaps.push(
-                            "Game audio goes through your sound server, which can't keep the microphone out on Linux"
-                                .into(),
-                        );
+                        gaps.push(AUDIO_GAP.into());
                     }
                 }
             }
@@ -190,10 +217,7 @@ impl Plan {
                 if let Some(auth) = std::env::var_os("XAUTHORITY") {
                     bind(&mut args, "--ro-bind-try", Path::new(&auth));
                 }
-                gaps.push(
-                    "X11 lets any window read the keyboard and screen of others; use a Wayland session for full protection"
-                        .into(),
-                );
+                gaps.push(X11_GAP.into());
             }
 
             for dir in &read {
@@ -245,9 +269,7 @@ impl Plan {
         Ok(Self::Landlock {
             read,
             write,
-            gaps: vec![
-                "bubblewrap isn't available, so the game can still reach the keyring and other apps through D-Bus; install bubblewrap for full protection".into(),
-            ],
+            gaps: vec![NO_BWRAP_GAP.into()],
         })
     }
 
