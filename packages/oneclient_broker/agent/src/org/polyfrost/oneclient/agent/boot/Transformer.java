@@ -51,6 +51,10 @@ final class Transformer implements ClassFileTransformer {
             new Target("switchDisplayMode", "(Lorg/lwjgl/opengl/DisplayMode;)V", false, 2, "lwjglSwitchMode",
                     Kind.VOID_BOOL, null));
 
+    private static final List<Target> WINDOWS_PATH = Arrays.asList(
+            new Target("toRealPath", "([Ljava/nio/file/LinkOption;)Lsun/nio/fs/WindowsPath;", false, 2, "realPath",
+                    Kind.OBJECT, "sun/nio/fs/WindowsPath"));
+
     private static final List<Target> HTTP_CLIENT = Arrays.asList(
             new Target("send", "(Ljava/net/http/HttpRequest;Ljava/net/http/HttpResponse$BodyHandler;)"
                     + "Ljava/net/http/HttpResponse;", false, 3, "httpSend", Kind.OBJECT, "java/net/http/HttpResponse"),
@@ -80,6 +84,7 @@ final class Transformer implements ClassFileTransformer {
                 return Hooks.discordRelay == null ? null : Patcher.patch(bytes, FILE);
             }
             if (name.equals("org/lwjgl/opengl/WindowsDisplay")) return Patcher.patch(bytes, LWJGL2_DISPLAY);
+            if (name.equals("sun/nio/fs/WindowsPath")) return Patcher.patch(bytes, WINDOWS_PATH);
             if (name.equals("java/lang/ProcessBuilder")) targets = PROCESS_BUILDER;
             else if (name.equals("java/awt/Desktop")) targets = DESKTOP;
             else if (name.equals("javax/swing/JFileChooser")) targets = CHOOSER;

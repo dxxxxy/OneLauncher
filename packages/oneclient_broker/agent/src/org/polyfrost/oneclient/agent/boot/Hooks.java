@@ -80,6 +80,34 @@ public final class Hooks {
         return true;
     }
 
+    // ---- sun.nio.fs.WindowsPath#toRealPath
+
+    private static final ThreadLocal<Boolean> inRealPath = new ThreadLocal<Boolean>();
+
+    /**
+     * On Windows, toRealPath looks up every path component in its parent,
+     * which needs permission to list that parent. A sandboxed game can't list
+     * C:\Users or the user's folder, so the call fails for every file under
+     * them, even ones the game may read. Java 24+ does this at startup for its
+     * own java.security file and can't start at all. When the file is
+     * reachable and only the lookup was refused, this answers with the
+     * absolute path instead: the right file, minus case and link resolution.
+     */
+    public static Object realPath(Object path, Object options) throws java.io.IOException {
+        if (!sandboxed || inRealPath.get() != null) return PASS;
+        java.nio.file.Path p = (java.nio.file.Path) path;
+        inRealPath.set(Boolean.TRUE);
+        try {
+            return p.toRealPath((java.nio.file.LinkOption[]) options);
+        } catch (java.nio.file.AccessDeniedException denied) {
+            java.nio.file.Path absolute = p.toAbsolutePath().normalize();
+            if (java.nio.file.Files.exists(absolute)) return absolute;
+            throw denied;
+        } finally {
+            inRealPath.remove();
+        }
+    }
+
     // ---- LWJGL 2 fullscreen (Windows)
 
     /**

@@ -1406,8 +1406,9 @@ struct ProtectedLaunch {
     broker: Option<(
         oneclient_broker::LaunchDescriptor,
         oneclient_broker::RunningBroker,
-        PathBuf,
     )>,
+    /// The agent jar, when the game gets one
+    agent: Option<PathBuf>,
     /// Rich presence for sandboxed games, which can't reach Discord
     discord: Option<oneclient_broker::DiscordRelay>,
     game_token: String,
@@ -1418,8 +1419,12 @@ struct ProtectedLaunch {
 impl ProtectedLaunch {
     fn jvm_arguments(&self) -> Vec<String> {
         let mut args = Vec::new();
-        if let Some((_, running, jar)) = &self.broker {
-            args.extend(oneclient_broker::agent::jvm_arguments(jar, running));
+        match (&self.agent, &self.broker) {
+            (Some(jar), Some((_, running))) => {
+                args.extend(oneclient_broker::agent::jvm_arguments(jar, running));
+            }
+            (Some(jar), None) => args.push(format!("-javaagent:{}", jar.display())),
+            (None, _) => {}
         }
         if self.sandbox.is_sandboxed() {
             let temp = self.temp.display();
@@ -1440,7 +1445,7 @@ impl ProtectedLaunch {
     }
 
     fn apply_env(&self, command: &mut Command) {
-        if let Some((descriptor, _, _)) = &self.broker {
+        if let Some((descriptor, _)) = &self.broker {
             command.env(oneclient_broker::KEY_ENV, &descriptor.key);
         }
         if self.sandbox.is_sandboxed() {
@@ -1471,7 +1476,7 @@ impl ProtectedLaunch {
         state
             .security
             .set_protection(cluster_id, self.sandbox.protection.clone());
-        if let Some((_, running, _)) = self.broker {
+        if let Some((_, running)) = self.broker {
             state.security.keep_broker(cluster_id, running);
         }
         if let Some(relay) = self.discord {
@@ -1649,22 +1654,32 @@ async fn protect_launch(
             .save(&session)
             .await
             .map_err(|err| GameError::Broker(err.to_string()))?;
-        let jar = oneclient_broker::agent::install(&metadata.join("agent"))
-            .await
-            .map_err(|err| GameError::Broker(err.to_string()))?;
-        Some((descriptor, running, jar))
+        Some((descriptor, running))
+    } else {
+        None
+    };
+
+    // the broker needs the agent, and so does a sandboxed game on its own
+    // (fullscreen, Discord, paths the sandbox can't list)
+    let agent = if broker.is_some() || sandbox.is_sandboxed() {
+        Some(
+            oneclient_broker::agent::install(&metadata.join("agent"))
+                .await
+                .map_err(|err| GameError::Broker(err.to_string()))?,
+        )
     } else {
         None
     };
 
     let game_token = match &broker {
-        Some((descriptor, _, _)) => descriptor.fake_token.clone(),
+        Some((descriptor, _)) => descriptor.fake_token.clone(),
         None => account.access_token.clone(),
     };
 
     Ok(ProtectedLaunch {
         sandbox,
         broker,
+        agent,
         discord,
         game_token,
         home,
