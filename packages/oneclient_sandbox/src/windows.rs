@@ -489,6 +489,10 @@ impl Container {
         if policy.localhost {
             exempt_loopback(&sid_string, &policy.home);
         }
+        if let Err(err) = allow_cursor_control(&sid) {
+            // the game still runs; only LWJGL 2's grabbed mouse misbehaves
+            tracing::warn!("could not let the game move its cursor: {err}");
+        }
 
         Ok(Self {
             home: policy.home.clone(),
@@ -537,6 +541,98 @@ impl Container {
         }
         spawn_in(self, spec).map(crate::GameChild::Raw)
     }
+}
+
+/// LWJGL 2 recenters a grabbed mouse with `SetCursorPos` and keeps it in the
+/// window with `ClipCursor`. Both need `WINSTA_WRITEATTRIBUTES` on the window
+/// station, which AppContainers don't get, and without it 1.8.9's camera
+/// spins. Grants exactly that to this instance's container, for this logon
+/// session only (window station permissions don't persist)
+fn allow_cursor_control(sid: &Sid) -> SandboxResult<()> {
+    use windows_sys::Win32::Security::Authorization::{
+        GetSecurityInfo, SE_WINDOW_OBJECT, SetSecurityInfo,
+    };
+    use windows_sys::Win32::System::StationsAndDesktops::{CloseWindowStation, OpenWindowStationW};
+    const READ_CONTROL: u32 = 0x0002_0000;
+    const WRITE_DAC: u32 = 0x0004_0000;
+    const WINSTA_READATTRIBUTES: u32 = 0x0002;
+    const WINSTA_WRITEATTRIBUTES: u32 = 0x0010;
+
+    // SAFETY: valid NUL-terminated name
+    let station =
+        unsafe { OpenWindowStationW(wide("WinSta0").as_ptr(), 0, READ_CONTROL | WRITE_DAC) };
+    if station.is_null() {
+        return Err(last_error("could not open the window station"));
+    }
+    let mut old: *mut ACL = std::ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: valid handle and out pointers
+    let err = unsafe {
+        GetSecurityInfo(
+            station,
+            SE_WINDOW_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut old,
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    let result = if err != 0 {
+        Err(SandboxError::Setup(format!(
+            "could not read the window station's permissions: error {err}"
+        )))
+    } else {
+        // GRANT_ACCESS merges with an entry from an earlier launch rather
+        // than adding another
+        let entry = EXPLICIT_ACCESS_W {
+            grfAccessPermissions: WINSTA_READATTRIBUTES | WINSTA_WRITEATTRIBUTES,
+            grfAccessMode: GRANT_ACCESS,
+            grfInheritance: 0,
+            Trustee: TRUSTEE_W {
+                pMultipleTrustee: std::ptr::null_mut(),
+                MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+                TrusteeForm: TRUSTEE_IS_SID,
+                TrusteeType: TRUSTEE_IS_WELL_KNOWN_GROUP,
+                ptstrName: sid.ptr.cast(),
+            },
+        };
+        let mut new: *mut ACL = std::ptr::null_mut();
+        // SAFETY: `old` belongs to `descriptor`, still alive
+        let err = unsafe { SetEntriesInAclW(1, &entry, old, &mut new) };
+        let result = if err != 0 {
+            Err(SandboxError::Setup(format!(
+                "could not build the window station's permissions: error {err}"
+            )))
+        } else {
+            // SAFETY: valid handle and ACL
+            let err = unsafe {
+                SetSecurityInfo(
+                    station,
+                    SE_WINDOW_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    new,
+                    std::ptr::null(),
+                )
+            };
+            unsafe { LocalFree(new.cast()) };
+            if err != 0 {
+                Err(SandboxError::Setup(format!(
+                    "could not set the window station's permissions: error {err}"
+                )))
+            } else {
+                Ok(())
+            }
+        };
+        unsafe { LocalFree(descriptor) };
+        result
+    };
+    // SAFETY: opened above
+    unsafe { CloseWindowStation(station) };
+    result
 }
 
 /// AppContainers can't reach loopback by default; lifting that needs admin
