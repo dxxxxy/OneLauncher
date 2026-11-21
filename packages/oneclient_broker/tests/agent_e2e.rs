@@ -48,6 +48,13 @@ public class Probe {
             ? new ProcessBuilder("rundll32", "url.dll,FileProtocolHandler", "https://modrinth.com").start()
             : new ProcessBuilder("xdg-open", "https://modrinth.com").start();
         System.out.println("opened=" + p.waitFor());
+
+        // 1.8.9's "Open resource pack folder": one string, split on spaces
+        String folder = args[1];
+        Process q = System.getProperty("os.name").startsWith("Windows")
+            ? Runtime.getRuntime().exec(String.format("cmd.exe /C start \"Open file\" \"%s\"", folder))
+            : Runtime.getRuntime().exec(new String[] {"/usr/bin/open", folder});
+        System.out.println("folder=" + q.waitFor());
     }
 }
 "#;
@@ -72,6 +79,9 @@ async fn the_agent_routes_account_requests_through_the_broker() {
     let dir = std::env::temp_dir().join(format!("oneclient-broker-e2e-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("Probe.java"), PROBE).unwrap();
+    // a space, as in most real paths, so the split string has to be re-read
+    let packs = dir.join("resource packs");
+    std::fs::create_dir_all(&packs).unwrap();
     let jar = oneclient_broker::agent::install(&dir.join("agent"))
         .await
         .unwrap();
@@ -93,6 +103,7 @@ async fn the_agent_routes_account_requests_through_the_broker() {
         .arg("-Doneclient.sandboxed=true")
         .arg(dir.join("Probe.java"))
         .arg(&descriptor.fake_token)
+        .arg(&packs)
         .env(oneclient_broker::KEY_ENV, &descriptor.key)
         .current_dir(&dir);
     let output = tokio::time::timeout(std::time::Duration::from_secs(60), command.output())
@@ -106,10 +117,12 @@ async fn the_agent_routes_account_requests_through_the_broker() {
         stdout.contains("status=403"),
         "stdout: {stdout}\nstderr: {stderr}"
     );
-    assert!(
-        stdout.contains("opened=0"),
-        "stdout: {stdout}\nstderr: {stderr}"
-    );
+    for line in ["opened=0", "folder=0"] {
+        assert!(
+            stdout.contains(line),
+            "stdout: {stdout}\nstderr: {stderr}"
+        );
+    }
 
     let log = host.log.lock().unwrap().clone();
     assert!(
@@ -120,7 +133,10 @@ async fn the_agent_routes_account_requests_through_the_broker() {
     assert!(log.iter().any(Activity::is_alarm), "{log:?}");
     assert_eq!(
         host.opened.lock().unwrap().as_slice(),
-        &[OpenTarget::Url("https://modrinth.com".parse().unwrap())]
+        &[
+            OpenTarget::Url("https://modrinth.com".parse().unwrap()),
+            OpenTarget::Path(std::fs::canonicalize(&packs).unwrap()),
+        ]
     );
 
     drop(broker);

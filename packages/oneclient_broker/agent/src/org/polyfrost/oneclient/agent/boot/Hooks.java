@@ -78,8 +78,60 @@ public final class Hooks {
             return command.size() > 1 ? last : null;
         }
         if (program.equals("gio") && command.size() > 2 && command.get(1).equals("open")) return last;
-        if (program.equals("cmd") && command.size() > 3 && command.contains("start")) return last;
+        if (program.equals("cmd")) return startTarget(command);
         return null;
+    }
+
+    /**
+     * The target of {@code cmd /c start ["title"] [/options] target}. Callers
+     * often pass one string to {@code Runtime.exec}, which splits on spaces
+     * and keeps the quotes (1.8.9's "Open resource pack folder" sends
+     * {@code cmd.exe /C start "Open file" "<path>"}), so the words after
+     * {@code start} are joined back and re-read the way cmd reads them.
+     */
+    static String startTarget(List<String> command) {
+        int start = -1;
+        for (int i = 1; i < command.size(); i++) {
+            if (command.get(i).equalsIgnoreCase("start")) {
+                start = i;
+                break;
+            }
+        }
+        if (start < 0) return null;
+        StringBuilder rest = new StringBuilder();
+        for (int i = start + 1; i < command.size(); i++) {
+            if (rest.length() > 0) rest.append(' ');
+            rest.append(command.get(i));
+        }
+        List<String> words = new java.util.ArrayList<String>();
+        List<Boolean> quoted = new java.util.ArrayList<Boolean>();
+        String line = rest.toString();
+        int i = 0;
+        while (i < line.length()) {
+            char c = line.charAt(i);
+            if (c == ' ') {
+                i++;
+            } else if (c == '"') {
+                int end = line.indexOf('"', i + 1);
+                if (end < 0) end = line.length();
+                words.add(line.substring(i + 1, end));
+                quoted.add(Boolean.TRUE);
+                i = end + 1;
+            } else {
+                int end = line.indexOf(' ', i);
+                if (end < 0) end = line.length();
+                words.add(line.substring(i, end));
+                quoted.add(Boolean.FALSE);
+                i = end;
+            }
+        }
+        int at = 0;
+        // a first quoted word is the window title when something follows it
+        if (words.size() > 1 && quoted.get(0).booleanValue()) at = 1;
+        while (at < words.size() && !quoted.get(at).booleanValue() && words.get(at).startsWith("/")) at++;
+        if (at >= words.size()) return null;
+        String target = words.get(at);
+        return target.isEmpty() ? null : target;
     }
 
     // ---- pickers
