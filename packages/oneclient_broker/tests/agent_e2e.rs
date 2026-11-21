@@ -739,3 +739,143 @@ async fn java_discord_rpc_reaches_discord_through_the_relay() {
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// OkHttp 3 and 4 share this API; the token goes on in an interceptor, the
+/// way mods usually add it
+const OKHTTP_PROBE: &str = r#"
+import okhttp3.*;
+public class OkProbe {
+    public static void main(String[] args) throws Exception {
+        String fake = System.getProperty("fake");
+        OkHttpClient client = new OkHttpClient.Builder()
+            .addInterceptor(chain -> chain.proceed(chain.request().newBuilder()
+                .header("Authorization", "Bearer " + fake).build()))
+            .build();
+        Request request = new Request.Builder()
+            .url("https://api.minecraftservices.com/minecraft/profile/capes/active")
+            .put(RequestBody.create(MediaType.parse("application/json"), "{\"capeId\":\"x\"}"))
+            .build();
+        try (Response response = client.newCall(request).execute()) {
+            System.out.println("okhttp=" + response.code() + " " + response.body().string());
+        }
+        System.exit(0);
+    }
+}
+"#;
+
+const APACHE_PROBE: &str = r#"
+import org.apache.http.client.methods.*;
+import org.apache.http.entity.*;
+import org.apache.http.impl.client.*;
+import org.apache.http.util.EntityUtils;
+public class ApacheProbe {
+    public static void main(String[] args) throws Exception {
+        try (CloseableHttpClient client = HttpClients.createDefault()) {
+            HttpPut put = new HttpPut("https://api.minecraftservices.com/minecraft/profile/capes/active");
+            put.setHeader("Authorization", "Bearer " + System.getProperty("fake"));
+            put.setEntity(new StringEntity("{\"capeId\":\"x\"}", ContentType.APPLICATION_JSON));
+            try (CloseableHttpResponse response = client.execute(put)) {
+                System.out.println("apache=" + response.getStatusLine().getStatusCode() + " "
+                    + EntityUtils.toString(response.getEntity()));
+            }
+        }
+        System.exit(0);
+    }
+}
+"#;
+
+/// Runs `source` with the agent and a broker whose host refuses every
+/// account change, on `classpath`; the prompts asked and stdout
+async fn run_http_probe(
+    java: &str,
+    class: &str,
+    source: &str,
+    classpath: &str,
+) -> (Vec<String>, String) {
+    let dir = std::env::temp_dir().join(format!("oneclient-broker-http-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join(format!("{class}.java"));
+    std::fs::write(&file, source).unwrap();
+    let jar = oneclient_broker::agent::install(&dir.join("agent"))
+        .await
+        .unwrap();
+    let descriptor =
+        LaunchDescriptor::new(1, Uuid::from_u128(1), vec![], None, Some(dir.join("run")));
+    let host = Arc::new(Host::default());
+    let broker =
+        oneclient_broker::start(&descriptor, host.clone(), reqwest::Client::new()).unwrap();
+
+    let mut command = tokio::process::Command::new(java);
+    command
+        .args(oneclient_broker::agent::jvm_arguments(&jar, &broker))
+        .arg(format!("-Dfake={}", descriptor.fake_token))
+        .arg("-cp")
+        .arg(classpath)
+        .arg(&file)
+        .env(oneclient_broker::KEY_ENV, &descriptor.key)
+        .current_dir(&dir);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(90), command.output())
+        .await
+        .expect("probe timed out")
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    drop(broker);
+    let _ = std::fs::remove_dir_all(dir);
+    let asked = host.asked.lock().unwrap().clone();
+    (asked, stdout)
+}
+
+/// Needs the libraries: `ONECLIENT_TEST_OKHTTP3_CP` (okhttp 3 and okio 1),
+/// `ONECLIENT_TEST_OKHTTP4_CP` (okhttp 4, okio 3 and kotlin-stdlib) and
+/// `ONECLIENT_TEST_APACHE_CP` (httpclient 4.5, httpcore, commons-logging and
+/// commons-codec), each optional
+#[tokio::test(flavor = "multi_thread")]
+async fn okhttp_and_apache_account_requests_go_through_the_broker() {
+    let Some(java) = java() else {
+        eprintln!("skipping: no java");
+        return;
+    };
+    let probes = [
+        (
+            "ONECLIENT_TEST_OKHTTP3_CP",
+            "OkProbe",
+            OKHTTP_PROBE,
+            "okhttp=",
+        ),
+        (
+            "ONECLIENT_TEST_OKHTTP4_CP",
+            "OkProbe",
+            OKHTTP_PROBE,
+            "okhttp=",
+        ),
+        (
+            "ONECLIENT_TEST_APACHE_CP",
+            "ApacheProbe",
+            APACHE_PROBE,
+            "apache=",
+        ),
+    ];
+    for (variable, class, source, prefix) in probes {
+        let Ok(classpath) = std::env::var(variable) else {
+            eprintln!("skipping {variable}: not set");
+            continue;
+        };
+        let (asked, stdout) = run_http_probe(&java, class, source, &classpath).await;
+        // refused in the launcher, so 403 from the broker without touching
+        // the network
+        assert!(
+            stdout.contains(&format!("{prefix}403 ")) && stdout.contains("OneClient blocked"),
+            "{variable}: {stdout}"
+        );
+        assert_eq!(asked.len(), 1, "{variable}: {asked:?}");
+        assert!(
+            asked[0].contains("change your cape"),
+            "{variable}: {asked:?}"
+        );
+    }
+}

@@ -165,6 +165,22 @@ final class Transformer implements ClassFileTransformer {
     private static final List<Target> RF_COMPANION = Arrays.asList(
             new Target("isUsable", "()Z", false, 1, "rfUsable", Kind.INT, null));
 
+    /** OkHttp 3 and 4, which do their own TLS (see OkHttp) */
+    private static final String OK_CONNECT = "okhttp3/internal/connection/ConnectInterceptor";
+    private static final List<Target> OKHTTP = Arrays.asList(
+            new Target("intercept", "(Lokhttp3/Interceptor$Chain;)Lokhttp3/Response;", false, 2, "okIntercept",
+                    Kind.OBJECT, "okhttp3/Response"));
+
+    /** Apache HttpClient 4's exec chain, which does its own TLS (see ApacheHttp) */
+    private static final String APACHE_EXEC = "org/apache/http/impl/execchain/";
+    private static final List<Target> APACHE = Arrays.asList(
+            new Target("execute", "(Lorg/apache/http/conn/routing/HttpRoute;"
+                    + "Lorg/apache/http/client/methods/HttpRequestWrapper;"
+                    + "Lorg/apache/http/client/protocol/HttpClientContext;"
+                    + "Lorg/apache/http/client/methods/HttpExecutionAware;)"
+                    + "Lorg/apache/http/client/methods/CloseableHttpResponse;", false, 3, "apacheExecute",
+                    Kind.OBJECT, "org/apache/http/client/methods/CloseableHttpResponse"));
+
     /** Poly+'s shaded Ktor CIO engine, which does its own TLS (see Ktor) */
     private static final String PP_CIO = "org/polyfrost/polyplus/libs/ktor/client/engine/cio/CIOEngine";
     private static final List<Target> KTOR_CIO = Arrays.asList(
@@ -205,6 +221,13 @@ final class Transformer implements ClassFileTransformer {
             }
             if (name.equals(PP_CIO) && Bridge.INSTANCE.configured()) {
                 return remember(loader, name, Patcher.patch(bytes, KTOR_CIO));
+            }
+            if (name.equals(OK_CONNECT) && Bridge.INSTANCE.configured()) {
+                return remember(loader, name, Patcher.patch(bytes, OKHTTP));
+            }
+            if ((name.equals(APACHE_EXEC + "MainClientExec") || name.equals(APACHE_EXEC + "MinimalClientExec"))
+                    && Bridge.INSTANCE.configured()) {
+                return remember(loader, name, Patcher.patch(bytes, APACHE));
             }
             if (!Hooks.sandboxed) return null;
             if (name.equals("java/io/RandomAccessFile")) {

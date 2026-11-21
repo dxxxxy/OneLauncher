@@ -760,6 +760,16 @@ public final class Hooks {
         }
     }
 
+    // ---- OkHttp and Apache HttpClient (see OkHttp, ApacheHttp)
+
+    public static Object okIntercept(Object interceptor, Object chain) throws Throwable {
+        return OkHttp.intercept(interceptor, chain);
+    }
+
+    public static Object apacheExecute(Object exec, Object route, Object request) throws Throwable {
+        return ApacheHttp.execute(exec, route, request);
+    }
+
     // ---- Poly+'s Ktor client (see Ktor)
 
     public static Object ktorExecute(Object engine, Object request, Object continuation) throws Throwable {
