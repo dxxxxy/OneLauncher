@@ -276,6 +276,19 @@ public final class Hooks {
         return sandboxed && file instanceof File && open(((File) file).getAbsolutePath());
     }
 
+    // ---- org.lwjgl.sdl.SDLMisc#SDL_OpenURL
+
+    /**
+     * 26.1+ opens links and folders (the resource pack folder, say) through
+     * SDL, which asks the shell directly; that never works in the sandbox. The
+     * launcher opens them instead, under the same rules as everything else.
+     */
+    public static Object sdlOpenUrl(Object url) {
+        if (!sandboxed || url == null) return PASS;
+        open(url.toString());
+        return Integer.valueOf(1);
+    }
+
     // ---- java.lang.ProcessBuilder#start
 
     public static Object start(Object builder) {

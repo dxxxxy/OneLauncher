@@ -37,6 +37,10 @@ final class Transformer implements ClassFileTransformer {
             new Target("tinyfd_selectFolderDialog", ")Ljava/lang/String;", true, 1, "tinyFolder", Kind.OBJECT,
                     "java/lang/String"));
 
+    /** Returns a boolean, which the JVM treats as an int */
+    private static final List<Target> SDL_MISC = Arrays.asList(
+            new Target("SDL_OpenURL", "(Ljava/lang/CharSequence;)Z", false, 1, "sdlOpenUrl", Kind.INT, null));
+
     private static final List<Target> RANDOM_ACCESS_FILE = Arrays.asList(
             new Target("<init>", "(Ljava/io/File;Ljava/lang/String;)V", false, 1, "discordPipe", Kind.REWRITE,
                     "java/io/File"),
@@ -98,6 +102,7 @@ final class Transformer implements ClassFileTransformer {
             else if (name.equals("java/awt/Desktop")) targets = DESKTOP;
             else if (name.equals("javax/swing/JFileChooser")) targets = CHOOSER;
             else if (name.equals("org/lwjgl/util/tinyfd/TinyFileDialogs")) targets = TINYFD;
+            else if (name.equals("org/lwjgl/sdl/SDLMisc")) targets = SDL_MISC;
             else return null;
 
             byte[] patched = Patcher.patch(bytes, targets);
