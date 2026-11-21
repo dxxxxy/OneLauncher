@@ -3,7 +3,7 @@ use freya::prelude::*;
 use freya::router::*;
 use oneclient_common::parse_mc_version;
 
-use crate::components::{Button, Icon, IconType, TabBar, TabItem};
+use crate::components::{Button, Icon, IconType, ProtectionBadge, TabBar, TabItem};
 use crate::hooks::{
     use_bisect, use_cluster, use_dispatch, use_game_snapshot, use_launcher, use_version_metadata,
 };
@@ -185,6 +185,7 @@ impl Component for ClusterShell {
                 launch_state,
                 game.is_running(cluster_id),
                 cluster.game_dir().ok(),
+                cluster.folder_name.clone(),
                 sharing,
             )
             .into_element()
@@ -318,6 +319,7 @@ fn cluster_header(
     launch_state: (&'static str, bool),
     running: bool,
     folder: Option<std::path::PathBuf>,
+    folder_name: String,
     mut sharing: State<bool>,
 ) -> impl IntoElement {
     let (launch_label, launch_enabled) = launch_state;
@@ -382,6 +384,11 @@ fn cluster_header(
                             .child(Icon::new(IconType::Square).size(ACTION_ICON_SIZE)),
                     )
                 })
+                .child(
+                    rect()
+                        .padding(Gaps::new(0., 4., 0., 4.))
+                        .child(ProtectionBadge::new(cluster_id, folder_name).size(18.)),
+                )
                 .child(
                     Button::new()
                         .primary()

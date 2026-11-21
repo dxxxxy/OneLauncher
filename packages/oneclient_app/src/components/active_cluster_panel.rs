@@ -2,7 +2,7 @@ use freya::animation::*;
 use freya::prelude::*;
 use freya::router::RouterContext;
 
-use crate::components::{Button, Icon, IconType, LobbyHeroChip};
+use crate::components::{Button, Icon, IconType, LobbyHeroChip, ProtectionBadge};
 use oneclient_common::parse_mc_version;
 use oneclient_core::clusters::ClusterKind;
 
@@ -92,6 +92,7 @@ impl Component for ActiveClusterPanel {
             (title, parts.join(" · "))
         };
         let cluster_id = cluster.id;
+        let folder_name = cluster.folder_name.clone();
         let syncing = launch_syncing(&launcher, cluster.uses_bundles());
         let shared_dir_taken = shared_dir_taken(&game, &sorted, cluster_id);
 
@@ -131,6 +132,7 @@ impl Component for ActiveClusterPanel {
                         dispatch,
                         launch_button_state(&game, cluster_id, syncing, shared_dir_taken),
                     ))
+                    .child(ProtectionBadge::new(cluster_id, folder_name).size(18.))
                     .child(cluster_settings_button(cluster_id)),
             )
             .child(LobbyHeroChip)
