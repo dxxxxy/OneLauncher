@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use oneclient_broker::{
-    Activity, ActivityKind, BoxFuture, BrokerHost, GameAccount, LaunchDescriptor, OpenTarget,
-    PickRequest,
+    Activity, ActivityKind, BoxFuture, BrokerHost, ConfirmPrompt, GameAccount, LaunchDescriptor,
+    OpenTarget, PickRequest,
 };
 use uuid::Uuid;
 
@@ -16,6 +16,7 @@ struct Host {
     opened: Mutex<Vec<OpenTarget>>,
     imported: Mutex<Vec<PathBuf>>,
     switched: Mutex<Vec<Uuid>>,
+    asked: Mutex<Vec<String>>,
 }
 
 impl BrokerHost for Host {
@@ -53,6 +54,11 @@ impl BrokerHost for Host {
                 },
             ]
         })
+    }
+
+    fn confirm(&self, prompt: ConfirmPrompt) -> BoxFuture<'_, bool> {
+        self.asked.lock().unwrap().push(prompt.title);
+        Box::pin(async { false })
     }
 
     fn switch_account(&self, to: Uuid) -> BoxFuture<'_, Result<(), String>> {
@@ -305,6 +311,152 @@ async fn the_agent_routes_account_requests_through_the_broker() {
         host.imported.lock().unwrap().as_slice(),
         &[PathBuf::from("/oneclient-e2e-missing/pack3.zip")]
     );
+
+    drop(broker);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Poly+'s shaded Ktor client, driven from Java the way Kotlin would
+const KTOR_PROBE: &str = r#"
+import java.lang.reflect.*;
+import java.util.concurrent.*;
+public class KtorProbe {
+    static final String K = "org.polyfrost.polyplus.libs.ktor.";
+    interface Suspend { Object call(Object continuation) throws Exception; }
+
+    /** Runs a suspend call to the end */
+    static Object await(Suspend f) throws Exception {
+        CompletableFuture<Object> result = new CompletableFuture<>();
+        Object context = Class.forName("kotlin.coroutines.EmptyCoroutineContext").getField("INSTANCE").get(null);
+        Object continuation = Proxy.newProxyInstance(KtorProbe.class.getClassLoader(),
+            new Class<?>[] {Class.forName("kotlin.coroutines.Continuation")}, (p, m, a) -> {
+                if (m.getName().equals("getContext")) return context;
+                if (m.getName().equals("resumeWith")) result.complete(a[0]);
+                return null;
+            });
+        Method marker = Class.forName("kotlin.coroutines.intrinsics.IntrinsicsKt").getMethod("getCOROUTINE_SUSPENDED");
+        marker.setAccessible(true);
+        Object suspended = marker.invoke(null);
+        Object value = f.call(continuation);
+        if (value == suspended) value = result.get(60, TimeUnit.SECONDS);
+        if (value != null && value.getClass().getName().equals("kotlin.Result$Failure")) {
+            throw new RuntimeException((Throwable) value.getClass().getField("exception").get(value));
+        }
+        return value;
+    }
+
+    static Object request(Object client, String method, String url, Object body) throws Exception {
+        Class<?> builderClass = Class.forName(K + "client.request.HttpRequestBuilder");
+        Object builder = builderClass.getConstructor().newInstance();
+        Class.forName(K + "client.request.HttpRequestKt").getMethod("url", builderClass, String.class).invoke(null, builder, url);
+        Object methods = Class.forName(K + "http.HttpMethod").getField("Companion").get(null);
+        builderClass.getMethod("setMethod", Class.forName(K + "http.HttpMethod"))
+            .invoke(builder, methods.getClass().getMethod("get" + method).invoke(methods));
+        Object headers = builderClass.getMethod("getHeaders").invoke(builder);
+        headers.getClass().getMethod("append", String.class, String.class)
+            .invoke(headers, "Authorization", "Bearer " + System.getProperty("fake"));
+        if (body != null) builderClass.getMethod("setBody", Object.class).invoke(builder, body);
+        Class<?> statementClass = Class.forName(K + "client.statement.HttpStatement");
+        Object statement = statementClass.getConstructor(builderClass, Class.forName(K + "client.HttpClient"))
+            .newInstance(builder, client);
+        Class<?> continuation = Class.forName("kotlin.coroutines.Continuation");
+        Object response = await(c -> statementClass.getMethod("execute", continuation).invoke(statement, c));
+        Object status = response.getClass().getMethod("getStatus").invoke(response);
+        Object text = await(c -> Class.forName(K + "client.statement.HttpResponseKt")
+            .getMethod("bodyAsText", Class.forName(K + "client.statement.HttpResponse"),
+                java.nio.charset.Charset.class, continuation)
+            .invoke(null, response, java.nio.charset.StandardCharsets.UTF_8, c));
+        return status.getClass().getMethod("getValue").invoke(status) + " " + text;
+    }
+
+    public static void main(String[] args) throws Exception {
+        Object cio = Class.forName(K + "client.engine.cio.CIO").getField("INSTANCE").get(null);
+        Object configure = Proxy.newProxyInstance(KtorProbe.class.getClassLoader(),
+            new Class<?>[] {Class.forName("kotlin.jvm.functions.Function1")}, (p, m, a) ->
+                m.getName().equals("invoke") ? Class.forName("kotlin.Unit").getField("INSTANCE").get(null) : null);
+        Object client = Class.forName(K + "client.HttpClientKt").getMethod("HttpClient",
+            Class.forName(K + "client.engine.HttpClientEngineFactory"), Class.forName("kotlin.jvm.functions.Function1"))
+            .invoke(null, cio, configure);
+        Class<?> contentType = Class.forName(K + "http.ContentType");
+
+        Object json = Class.forName(K + "http.ContentType$Application").getField("INSTANCE").get(null);
+        Object cape = Class.forName(K + "http.content.TextContent")
+            .getConstructor(String.class, contentType, Class.forName(K + "http.HttpStatusCode"))
+            .newInstance("{}", json.getClass().getMethod("getJson").invoke(json), null);
+        System.out.println("cape=" + request(client, "Put",
+            "https://api.minecraftservices.com/minecraft/profile/capes/active", cape));
+
+        Object headersCompanion = Class.forName(K + "http.Headers").getField("Companion").get(null);
+        Object noHeaders = headersCompanion.getClass().getMethod("getEmpty").invoke(headersCompanion);
+        Class<?> formPart = Class.forName(K + "client.request.forms.FormPart");
+        Object part = formPart.getConstructor(String.class, Object.class, Class.forName(K + "http.Headers"))
+            .newInstance("file", "pretend-png", noHeaders);
+        Object partsArray = Array.newInstance(formPart, 1);
+        Array.set(partsArray, 0, part);
+        Object parts = Class.forName(K + "client.request.forms.FormDslKt")
+            .getMethod("formData", partsArray.getClass()).invoke(null, partsArray);
+        Object multipart = Class.forName(K + "http.ContentType$MultiPart").getField("INSTANCE").get(null);
+        Object form = Class.forName(K + "client.request.forms.MultiPartFormDataContent")
+            .getConstructor(java.util.List.class, String.class, contentType)
+            .newInstance(parts, "oneclientboundary", multipart.getClass().getMethod("getFormData").invoke(multipart));
+        System.out.println("skin=" + request(client, "Post",
+            "https://api.minecraftservices.com/minecraft/profile/skins", form));
+        System.exit(0);
+    }
+}
+"#;
+
+/// Needs Poly+ and its Kotlin libraries: `ONECLIENT_TEST_POLYPLUS_CP` is a
+/// class path holding polyplus.jar, kotlin-stdlib and kotlinx-coroutines
+#[tokio::test(flavor = "multi_thread")]
+async fn poly_plus_ktor_requests_go_through_the_broker() {
+    let Some(java) = java() else {
+        eprintln!("skipping: no java");
+        return;
+    };
+    let Ok(classpath) = std::env::var("ONECLIENT_TEST_POLYPLUS_CP") else {
+        eprintln!("skipping: ONECLIENT_TEST_POLYPLUS_CP not set");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("oneclient-broker-ktor-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("KtorProbe.java"), KTOR_PROBE).unwrap();
+    let jar = oneclient_broker::agent::install(&dir.join("agent"))
+        .await
+        .unwrap();
+    let descriptor =
+        LaunchDescriptor::new(1, Uuid::from_u128(1), vec![], None, Some(dir.join("run")));
+    let host = Arc::new(Host::default());
+    let broker =
+        oneclient_broker::start(&descriptor, host.clone(), reqwest::Client::new()).unwrap();
+
+    let mut command = tokio::process::Command::new(&java);
+    command
+        .args(oneclient_broker::agent::jvm_arguments(&jar, &broker))
+        .arg(format!("-Dfake={}", descriptor.fake_token))
+        .arg("-cp")
+        .arg(&classpath)
+        .arg(dir.join("KtorProbe.java"))
+        .env(oneclient_broker::KEY_ENV, &descriptor.key)
+        .current_dir(&dir);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(90), command.output())
+        .await
+        .expect("probe timed out")
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // this host refuses every account change, so both come back 403 from the
+    // broker without touching the network; the multipart body still had to
+    // be read in full to get there
+    for line in ["cape=403 ", "skin=403 ", "OneClient blocked"] {
+        assert!(stdout.contains(line), "stdout: {stdout}\nstderr: {stderr}");
+    }
+    let asked = host.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert!(asked[0].contains("change your cape"), "{asked:?}");
+    assert!(asked[1].contains("change your skin"), "{asked:?}");
 
     drop(broker);
     let _ = std::fs::remove_dir_all(dir);

@@ -50,7 +50,9 @@ public final class Exchange {
                 Bridge.writeBytes(out, body == null ? new byte[0] : body);
                 Bridge.writeString(out, caller);
             }
-        }, Math.max(timeoutMillis, 30000));
+        // long enough for the user to answer the launcher's question about an
+        // account change (it gives up after a minute)
+        }, Math.max(timeoutMillis, 90000));
 
         if (reply.kind != Bridge.HTTP_REPLY) {
             String error = reply.error();

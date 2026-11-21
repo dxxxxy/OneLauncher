@@ -618,6 +618,12 @@ public final class Hooks {
         }
     }
 
+    // ---- Poly+'s Ktor client (see Ktor)
+
+    public static Object ktorExecute(Object engine, Object request, Object continuation) throws Throwable {
+        return Ktor.execute(engine, request, continuation);
+    }
+
     // ---- Poly+ accounts (see PolyPlus)
 
     public static Object ppLoad(Object store) throws Exception {

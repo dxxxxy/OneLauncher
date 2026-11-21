@@ -136,6 +136,12 @@ final class Transformer implements ClassFileTransformer {
             new Target("refreshAfterRejection", "()Z", false, 0, "ppRefreshAfterRejection", Kind.INT, null),
             new Target("startRefreshIfExpired", "()V", false, 1, "ppSkip", Kind.VOID_BOOL, null));
 
+    /** Poly+'s shaded Ktor CIO engine, which does its own TLS (see Ktor) */
+    private static final String PP_CIO = "org/polyfrost/polyplus/libs/ktor/client/engine/cio/CIOEngine";
+    private static final List<Target> KTOR_CIO = Arrays.asList(
+            new Target("execute", "Lkotlin/coroutines/Continuation;)Ljava/lang/Object;", true, 3, "ktorExecute",
+                    Kind.OBJECT, "java/lang/Object"));
+
     /** Patched classes outside the JDK that may live in a named module. */
     private static final ConcurrentLinkedQueue<Object[]> toFix = new ConcurrentLinkedQueue<Object[]>();
 
@@ -167,6 +173,9 @@ final class Transformer implements ClassFileTransformer {
                 else if (name.equals(PP + "SessionRefresh")) targets = PP_REFRESH;
                 else return null;
                 return remember(loader, name, Patcher.patch(bytes, targets));
+            }
+            if (name.equals(PP_CIO) && Bridge.INSTANCE.configured()) {
+                return remember(loader, name, Patcher.patch(bytes, KTOR_CIO));
             }
             if (!Hooks.sandboxed) return null;
             if (name.equals("java/io/RandomAccessFile")) {
