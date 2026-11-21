@@ -17,6 +17,8 @@ struct Host {
     imported: Mutex<Vec<PathBuf>>,
     switched: Mutex<Vec<Uuid>>,
     asked: Mutex<Vec<String>>,
+    revealed: Mutex<Vec<PathBuf>>,
+    trashed: Mutex<Vec<PathBuf>>,
 }
 
 impl BrokerHost for Host {
@@ -63,6 +65,15 @@ impl BrokerHost for Host {
 
     fn switch_account(&self, to: Uuid) -> BoxFuture<'_, Result<(), String>> {
         self.switched.lock().unwrap().push(to);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn reveal(&self, file: PathBuf) {
+        self.revealed.lock().unwrap().push(file);
+    }
+
+    fn trash(&self, path: PathBuf) -> BoxFuture<'_, Result<(), String>> {
+        self.trashed.lock().unwrap().push(path);
         Box::pin(async { Ok(()) })
     }
 }
@@ -155,6 +166,26 @@ public class Probe {
         Class<?> switcher = stubLoader.loadClass("org.polyfrost.polyplus.client.launcher.AccountSwitch");
         System.out.println("switched=" + switcher.getMethod("apply", alt.getClass())
             .invoke(switcher.getConstructor().newInstance(), alt));
+
+        // Poly+'s pack screen: trash through PowerShell (refused here, the
+        // stub says no) and "show in Explorer", both through the launcher
+        java.nio.file.Path old = java.nio.file.Paths.get(args[1], "old.zip");
+        java.nio.file.Files.write(old, new byte[] {1});
+        String packsPackage = "org/polyfrost/polyplus/client/gui/screens/packs/";
+        java.nio.file.Path packSource = stubs.resolve(packsPackage + "PackFiles.java");
+        java.nio.file.Files.createDirectories(packSource.getParent());
+        java.nio.file.Files.write(packSource, ("package org.polyfrost.polyplus.client.gui.screens.packs;"
+            + " public class PackFiles { private boolean toTrash(java.nio.file.Path p) { return false; }"
+            + " public boolean trash(java.nio.file.Path p) { return toTrash(p); }"
+            + " public int reveal(java.nio.file.Path p) throws Exception {"
+            + "  return new ProcessBuilder(\"explorer.exe\", \"/select,\" + p.toAbsolutePath()).start().waitFor(); } }")
+            .getBytes("UTF-8"));
+        javax.tools.ToolProvider.getSystemJavaCompiler().run(null, null, null, "-d", stubs.toString(),
+            packSource.toString());
+        Class<?> packFiles = stubLoader.loadClass("org.polyfrost.polyplus.client.gui.screens.packs.PackFiles");
+        Object files = packFiles.getConstructor().newInstance();
+        System.out.println("trashed=" + packFiles.getMethod("trash", java.nio.file.Path.class).invoke(files, old));
+        System.out.println("revealed=" + packFiles.getMethod("reveal", java.nio.file.Path.class).invoke(files, old));
 
         // jagrosh-style Discord IPC: the pipe opened as a file
         if (System.getProperty("os.name").startsWith("Windows")) {
@@ -261,6 +292,8 @@ async fn the_agent_routes_account_requests_through_the_broker() {
         "async=403",
         "dropped=imported.zip",
         "switched=true",
+        "trashed=true",
+        "revealed=0",
     ];
     if cfg!(windows) {
         expected.push("discord=k");
@@ -307,6 +340,9 @@ async fn the_agent_routes_account_requests_through_the_broker() {
         host.switched.lock().unwrap().as_slice(),
         &[Uuid::from_u128(2)]
     );
+    let old = std::fs::canonicalize(&packs).unwrap().join("old.zip");
+    assert_eq!(host.trashed.lock().unwrap().as_slice(), &[old.clone()]);
+    assert_eq!(host.revealed.lock().unwrap().as_slice(), &[old]);
     assert_eq!(
         host.imported.lock().unwrap().as_slice(),
         &[PathBuf::from("/oneclient-e2e-missing/pack3.zip")]

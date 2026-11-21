@@ -29,7 +29,7 @@ final class Bridge {
     static final Charset UTF8 = Charset.forName("UTF-8");
 
     static final byte HELLO = 1, HTTP = 2, OPEN = 3, PICK = 4, IMPORT = 5, ACCOUNTS = 6, SWITCH_ACCOUNT = 7,
-            ADD_ACCOUNT = 8;
+            ADD_ACCOUNT = 8, TRASH = 9, REVEAL = 10;
     static final int OK = 0x81, HTTP_REPLY = 0x82, ERROR = 0x83, PICKED = 0x84, ACCOUNTS_REPLY = 0x85;
 
     private final String up;

@@ -48,6 +48,10 @@ impl SecurityUi for AppSecurityUi {
         crate::platform::focus_window();
     }
 
+    fn reveal(&self, file: &Path) {
+        crate::platform::reveal_path(file);
+    }
+
     fn confirm(&self, prompt: ConfirmPrompt) -> BoxFuture<'_, bool> {
         Box::pin(async move {
             crate::platform::focus_window();

@@ -2654,5 +2654,7 @@
   "oneclient.cluster.security.activity.imported": "Copied in a file you dropped on the game: %1$s",
   "oneclient.cluster.security.activity.switched_account": "Switched the game to %1$s",
   "oneclient.cluster.security.activity.import_refused": "Didn't copy in %1$s",
+  "oneclient.cluster.security.activity.trashed": "Moved %1$s to the trash",
+  "oneclient.cluster.security.activity.trash_refused": "Didn't move %1$s to the trash",
   "oneclient.cluster.security.activity.sensitive": "Blocked %1$s from reading %2$s"
 }

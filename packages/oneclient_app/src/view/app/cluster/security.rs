@@ -94,6 +94,12 @@ fn describe(activity: &Activity) -> String {
             "oneclient.cluster.security.activity.import_refused",
             &[from],
         ),
+        ActivityKind::Trashed {
+            path, done: true, ..
+        } => tf("oneclient.cluster.security.activity.trashed", &[path]),
+        ActivityKind::Trashed {
+            path, done: false, ..
+        } => tf("oneclient.cluster.security.activity.trash_refused", &[path]),
         ActivityKind::SensitiveAccess { path, caller } => tf(
             "oneclient.cluster.security.activity.sensitive",
             &[caller, path],

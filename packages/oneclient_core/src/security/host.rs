@@ -219,6 +219,31 @@ impl BrokerHost for LauncherBrokerHost {
             .send();
     }
 
+    fn reveal(&self, file: PathBuf) {
+        if let Some(ui) = self.security.ui() {
+            ui.reveal(&file);
+        }
+    }
+
+    fn trash(&self, path: PathBuf) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            // the recycle bin doesn't take `\\?\` paths
+            let path = dunce::simplified(&path).to_path_buf();
+            let shown = path.display().to_string();
+            match tokio::task::spawn_blocking(move || trash::delete(&path)).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(err)) => {
+                    tracing::warn!(
+                        cluster_id = self.cluster_id,
+                        "couldn't trash {shown}: {err}"
+                    );
+                    Err(format!("couldn't move it to the trash: {err}"))
+                }
+                Err(err) => Err(err.to_string()),
+            }
+        })
+    }
+
     fn import(&self, from: PathBuf, _caller: String) -> BoxFuture<'_, Option<PathBuf>> {
         Box::pin(async move {
             if !self.sandboxed || !from.is_absolute() {

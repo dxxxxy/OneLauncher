@@ -78,6 +78,13 @@ pub enum ActivityKind {
         to: String,
         caller: String,
     },
+    /// The game moved a file inside the instance to the user's trash, or
+    /// was refused (`done` false)
+    Trashed {
+        path: String,
+        done: bool,
+        caller: String,
+    },
     /// A file dropped on the game, copied in (`to`) or refused
     Imported {
         from: String,

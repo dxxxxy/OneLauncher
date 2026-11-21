@@ -29,6 +29,12 @@ pub trait SecurityUi: Send + Sync + 'static {
     fn confirm(&self, prompt: ConfirmPrompt) -> oneclient_broker::BoxFuture<'_, bool>;
     /// Bring the launcher's window to the front
     fn focus(&self);
+    /// Select a file in the file manager; by default its folder is opened
+    fn reveal(&self, file: &Path) {
+        if let Some(folder) = file.parent() {
+            self.open_path(folder);
+        }
+    }
 }
 
 const ACTIVITY_LIMIT: usize = 500;

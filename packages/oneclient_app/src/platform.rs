@@ -189,6 +189,63 @@ fn open_target(target: &str) {
     });
 }
 
+/// Selects `file` in the user's file manager, or opens its folder where
+/// that isn't possible
+pub fn reveal_path(file: &std::path::Path) {
+    let file = dunce::simplified(file).to_path_buf();
+    std::thread::spawn(move || {
+        if let Err(err) = select_in_file_manager(&file) {
+            tracing::debug!(%err, "couldn't select {}, opening its folder", file.display());
+            if let Some(folder) = file.parent() {
+                open_target(&folder.display().to_string());
+            }
+        }
+    });
+}
+
+#[cfg(windows)]
+fn select_in_file_manager(file: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+
+    // explorer wants the path quoted after the comma, which `arg` won't do
+    std::process::Command::new("explorer")
+        .raw_arg(format!("/select,\"{}\"", file.display()))
+        .spawn()
+        .map(drop)
+}
+
+#[cfg(target_os = "macos")]
+fn select_in_file_manager(file: &std::path::Path) -> std::io::Result<()> {
+    std::process::Command::new("open")
+        .arg("-R")
+        .arg(file)
+        .spawn()
+        .map(drop)
+}
+
+#[cfg(target_os = "linux")]
+fn select_in_file_manager(file: &std::path::Path) -> std::io::Result<()> {
+    let uri = url::Url::from_file_path(file)
+        .map_err(|()| std::io::Error::other("not an absolute path"))?;
+    zbus::blocking::Connection::session()
+        .and_then(|session| {
+            session.call_method(
+                Some("org.freedesktop.FileManager1"),
+                "/org/freedesktop/FileManager1",
+                Some("org.freedesktop.FileManager1"),
+                "ShowItems",
+                &(vec![uri.as_str()], ""),
+            )
+        })
+        .map(drop)
+        .map_err(std::io::Error::other)
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+fn select_in_file_manager(_file: &std::path::Path) -> std::io::Result<()> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+
 #[cfg(not(target_os = "linux"))]
 fn open_target(target: &str) {
     let target = target.to_owned();

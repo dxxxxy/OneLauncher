@@ -52,6 +52,18 @@ pub trait BrokerHost: Send + Sync + 'static {
     }
     /// Show the launcher's own way to add an account
     fn add_account(&self) {}
+    /// Select an already-validated file inside the instance in the user's
+    /// file manager; by default its folder is opened
+    fn reveal(&self, file: PathBuf) {
+        if let Some(folder) = file.parent() {
+            self.open(OpenTarget::Path(folder.to_path_buf()));
+        }
+    }
+    /// Move an already-validated file or folder inside the instance to the
+    /// user's trash
+    fn trash(&self, _path: PathBuf) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async { Err("the trash isn't available".into()) })
+    }
 }
 
 /// A yes/no question for the user, shown by the launcher
@@ -314,6 +326,40 @@ pub(crate) async fn handle(shared: &Shared, request: Request) -> Reply {
             shared.host.add_account();
             Reply::Ok
         }
+        Request::Reveal { path, caller } => {
+            match validate_instance_file(&path, &shared.config.open_roots) {
+                Some(file) => {
+                    shared.record(ActivityKind::Opened {
+                        target: path,
+                        caller,
+                    });
+                    shared.host.reveal(file);
+                    Reply::Ok
+                }
+                None => {
+                    shared.record(ActivityKind::OpenRefused {
+                        target: path,
+                        caller,
+                    });
+                    Reply::Error("OneClient only shows files inside this instance".into())
+                }
+            }
+        }
+        Request::Trash { path, caller } => {
+            let result = match validate_instance_file(&path, &shared.config.open_roots) {
+                Some(file) => shared.host.trash(file).await,
+                None => Err("OneClient only trashes files inside this instance".into()),
+            };
+            shared.record(ActivityKind::Trashed {
+                path,
+                done: result.is_ok(),
+                caller,
+            });
+            match result {
+                Ok(()) => Reply::Ok,
+                Err(err) => Reply::Error(err),
+            }
+        }
         Request::Import { path, caller } => {
             let copied = shared
                 .host
@@ -552,6 +598,37 @@ pub fn validate_open(target: &str, roots: &[PathBuf]) -> Option<OpenTarget> {
     validate_path(Path::new(target), roots)
 }
 
+/// A file or folder strictly inside one of `roots`: never a root itself,
+/// and nothing in the launcher's own `.oneclient` folder. A link is judged
+/// by where it sits, not where it points, so trashing it only moves the link
+pub fn validate_instance_file(target: &str, roots: &[PathBuf]) -> Option<PathBuf> {
+    let path = Path::new(target);
+    if !path.is_absolute() {
+        return None;
+    }
+    let name = path.file_name()?;
+    let file = std::fs::canonicalize(path.parent()?).ok()?.join(name);
+    std::fs::symlink_metadata(&file).ok()?;
+    let roots: Vec<PathBuf> = roots
+        .iter()
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .collect();
+    if roots.contains(&file) {
+        return None;
+    }
+    let relative = roots
+        .iter()
+        .filter_map(|root| file.strip_prefix(root).ok())
+        .min_by_key(|relative| relative.components().count())?;
+    if relative
+        .components()
+        .any(|part| part.as_os_str() == ".oneclient")
+    {
+        return None;
+    }
+    Some(file)
+}
+
 fn validate_path(path: &Path, roots: &[PathBuf]) -> Option<OpenTarget> {
     let canonical = std::fs::canonicalize(path).ok()?;
     let inside = roots.iter().any(|root| {
@@ -611,5 +688,54 @@ mod tests {
             None
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn trashes_and_reveals_files_inside_the_instance_only() {
+        let root = std::env::temp_dir().join(format!("broker-trash-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("resourcepacks/Faithful")).unwrap();
+        std::fs::create_dir_all(root.join(".oneclient")).unwrap();
+        std::fs::write(root.join("resourcepacks/old.zip"), b"x").unwrap();
+        std::fs::write(root.join(".oneclient/session.json"), b"x").unwrap();
+        let outside = std::env::temp_dir().join(format!("broker-outside-{}", Uuid::new_v4()));
+        std::fs::write(&outside, b"x").unwrap();
+        let roots = vec![root.clone()];
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        let check = |path: PathBuf| validate_instance_file(path.to_str().unwrap(), &roots);
+
+        assert_eq!(
+            check(root.join("resourcepacks/old.zip")),
+            Some(canonical.join("resourcepacks").join("old.zip"))
+        );
+        assert_eq!(
+            check(root.join("resourcepacks/Faithful")),
+            Some(canonical.join("resourcepacks").join("Faithful"))
+        );
+        // through a `..` that stays inside
+        assert_eq!(
+            check(root.join("resourcepacks/Faithful/../old.zip")),
+            Some(canonical.join("resourcepacks").join("old.zip"))
+        );
+
+        assert_eq!(check(root.clone()), None);
+        assert_eq!(check(root.join("resourcepacks/..")), None);
+        assert_eq!(check(root.join(".oneclient")), None);
+        assert_eq!(check(root.join(".oneclient/session.json")), None);
+        assert_eq!(check(root.join("resourcepacks/missing.zip")), None);
+        assert_eq!(check(outside.clone()), None);
+        assert_eq!(
+            check(
+                root.join("resourcepacks/../..")
+                    .join(outside.file_name().unwrap())
+            ),
+            None
+        );
+        assert_eq!(
+            validate_instance_file("resourcepacks/old.zip", &roots),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_file(outside);
     }
 }

@@ -375,10 +375,78 @@ public final class Hooks {
 
     public static Object start(Object builder) {
         if (!sandboxed || !(builder instanceof ProcessBuilder)) return PASS;
-        String target = openerTarget(((ProcessBuilder) builder).command());
+        List<String> command = ((ProcessBuilder) builder).command();
+        String revealed = revealTarget(command);
+        if (revealed != null) {
+            fileRequest(Bridge.REVEAL, revealed);
+            return new FinishedProcess();
+        }
+        String target = openerTarget(command);
         if (target == null) return PASS;
         open(target);
         return new FinishedProcess();
+    }
+
+    /**
+     * The file a "show in folder" helper was asked to select:
+     * {@code explorer /select,<path>} or {@code open -R <path>}. Null for
+     * anything else.
+     */
+    static String revealTarget(List<String> command) {
+        if (command == null || command.size() < 2) return null;
+        String program = new File(command.get(0)).getName().toLowerCase(Locale.ROOT);
+        if (program.endsWith(".exe")) program = program.substring(0, program.length() - 4);
+        if (program.equals("explorer")) {
+            // one argument or several: explorer reads its command line whole
+            StringBuilder joined = new StringBuilder();
+            for (int i = 1; i < command.size(); i++) {
+                if (i > 1) joined.append(' ');
+                joined.append(command.get(i));
+            }
+            String args = joined.toString().trim();
+            if (!args.toLowerCase(Locale.ROOT).startsWith("/select,")) return null;
+            String path = args.substring("/select,".length()).trim();
+            if (path.length() >= 2 && path.startsWith("\"") && path.endsWith("\"")) {
+                path = path.substring(1, path.length() - 1);
+            }
+            return path.isEmpty() ? null : path;
+        }
+        if (program.equals("open") && command.size() > 2 && command.get(1).equals("-R")) {
+            return command.get(command.size() - 1);
+        }
+        return null;
+    }
+
+    /** Asks the launcher to reveal or trash an instance file; whether it did */
+    private static boolean fileRequest(final byte kind, final String path) {
+        final String caller = Bridge.caller();
+        try {
+            Bridge.Reply reply = Bridge.INSTANCE.call(kind, new Bridge.Body() {
+                public void write(DataOutputStream out) throws IOException {
+                    Bridge.writeString(out, path);
+                    Bridge.writeString(out, caller);
+                }
+            }, 30000);
+            String error = reply.error();
+            if (error == null) return true;
+            Main.log("OneClient refused " + (kind == Bridge.TRASH ? "to trash " : "to show ") + path + ": " + error);
+        } catch (IOException e) {
+            Main.log("could not reach OneClient for " + path + ": " + e.getMessage());
+        }
+        return false;
+    }
+
+    // ---- Poly+'s pack screen (PackFiles#toTrash)
+
+    /**
+     * Poly+ trashes packs with PowerShell, osascript or gio, none of which the
+     * sandbox lets it run; the launcher moves the file to the user's trash,
+     * but only if it's inside the instance.
+     */
+    public static Object ppTrash(Object packFiles, Object path) {
+        if (!(path instanceof java.nio.file.Path)) return PASS;
+        String absolute = ((java.nio.file.Path) path).toAbsolutePath().toString();
+        return Integer.valueOf(fileRequest(Bridge.TRASH, absolute) ? 1 : 0);
     }
 
     /** The URL or path an "open this" helper was asked to open, or null for any other program. */

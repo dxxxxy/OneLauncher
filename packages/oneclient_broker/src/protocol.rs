@@ -57,6 +57,10 @@ pub enum Request {
     SwitchAccount { account: String, caller: String },
     /// Start adding an account in the launcher
     AddAccount { caller: String },
+    /// Move a file or folder inside the instance to the user's trash
+    Trash { path: String, caller: String },
+    /// Select a file inside the instance in the user's file manager
+    Reveal { path: String, caller: String },
 }
 
 /// One of the user's accounts as the game may see it: never a token
@@ -151,6 +155,8 @@ const IMPORT: u8 = 5;
 const ACCOUNTS: u8 = 6;
 const SWITCH_ACCOUNT: u8 = 7;
 const ADD_ACCOUNT: u8 = 8;
+const TRASH: u8 = 9;
+const REVEAL: u8 = 10;
 
 const OK: u8 = 0x81;
 const HTTP_REPLY: u8 = 0x82;
@@ -314,6 +320,17 @@ pub fn encode_request(id: u32, request: &Request) -> Vec<u8> {
             w.string(caller);
             w.frame()
         }
+        Request::Trash { path, caller } | Request::Reveal { path, caller } => {
+            let kind = if matches!(request, Request::Trash { .. }) {
+                TRASH
+            } else {
+                REVEAL
+            };
+            let mut w = Writer::new(id, kind);
+            w.string(path);
+            w.string(caller);
+            w.frame()
+        }
     }
 }
 
@@ -360,6 +377,14 @@ pub fn decode_request(payload: &[u8]) -> io::Result<(u32, Request)> {
             caller: r.string()?,
         },
         ADD_ACCOUNT => Request::AddAccount {
+            caller: r.string()?,
+        },
+        TRASH => Request::Trash {
+            path: r.string()?,
+            caller: r.string()?,
+        },
+        REVEAL => Request::Reveal {
+            path: r.string()?,
             caller: r.string()?,
         },
         other => return Err(invalid(format!("unknown request kind {other}"))),
@@ -501,6 +526,14 @@ mod tests {
             caller: "polyplus".into(),
         });
         round_trip_request(Request::AddAccount {
+            caller: String::new(),
+        });
+        round_trip_request(Request::Trash {
+            path: "C:\\instance\\resourcepacks\\old.zip".into(),
+            caller: "polyplus".into(),
+        });
+        round_trip_request(Request::Reveal {
+            path: "/instance/resourcepacks/old.zip".into(),
             caller: String::new(),
         });
         round_trip_request(Request::Pick {

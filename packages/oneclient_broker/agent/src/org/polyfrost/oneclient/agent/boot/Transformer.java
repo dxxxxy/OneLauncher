@@ -136,6 +136,11 @@ final class Transformer implements ClassFileTransformer {
             new Target("refreshAfterRejection", "()Z", false, 0, "ppRefreshAfterRejection", Kind.INT, null),
             new Target("startRefreshIfExpired", "()V", false, 1, "ppSkip", Kind.VOID_BOOL, null));
 
+    /** Poly+'s pack screen moves packs to the trash with programs the sandbox can't run */
+    private static final String PP_PACK_FILES = "org/polyfrost/polyplus/client/gui/screens/packs/PackFiles";
+    private static final List<Target> PP_PACKS = Arrays.asList(
+            new Target("toTrash", "(Ljava/nio/file/Path;)Z", false, 2, "ppTrash", Kind.INT, null));
+
     /** Poly+'s shaded Ktor CIO engine, which does its own TLS (see Ktor) */
     private static final String PP_CIO = "org/polyfrost/polyplus/libs/ktor/client/engine/cio/CIOEngine";
     private static final List<Target> KTOR_CIO = Arrays.asList(
@@ -199,6 +204,7 @@ final class Transformer implements ClassFileTransformer {
             else if (name.equals("org/lwjgl/glfw/GLFWDropCallback")) targets = GLFW_DROP;
             else if (name.equals("java/awt/Dialog")) targets = AWT_DIALOG;
             else if (name.equals("org/lwjgl/glfw/GLFW")) targets = GLFW;
+            else if (name.equals(PP_PACK_FILES)) targets = PP_PACKS;
             else return null;
 
             return remember(loader, name, Patcher.patch(bytes, targets));
