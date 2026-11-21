@@ -436,6 +436,67 @@ public final class Hooks {
         return false;
     }
 
+    // ---- Resourcify's manual downloads (DownloadWatcherScreen)
+
+    private static final java.util.Map<Object, Boolean> watching =
+            java.util.Collections.synchronizedMap(new java.util.WeakHashMap<Object, Boolean>());
+
+    /** The game's own Downloads folder exists, so Resourcify offers the manual download */
+    public static Object rfUsable(Object companion) {
+        new File(System.getProperty("user.home"), "Downloads").mkdirs();
+        return PASS;
+    }
+
+    /**
+     * The first tick of a watcher screen: the launcher watches the user's
+     * real Downloads folder for this exact file (extension, size and SHA-1)
+     * and copies it into the game's, where Resourcify is looking.
+     */
+    public static boolean rfWatch(Object screen) {
+        if (watching.put(screen, Boolean.TRUE) != null) return false;
+        try {
+            final String extension = (String) field(screen, "extension");
+            final long size = ((Long) field(screen, "size")).longValue();
+            final String sha1 = (String) field(screen, "sha1");
+            watchDownloads(extension, size, sha1);
+        } catch (Exception e) {
+            Main.log("could not watch downloads for Resourcify: " + e);
+        }
+        return false;
+    }
+
+    public static boolean rfStop(Object screen) {
+        if (watching.remove(screen) != null) {
+            try {
+                watchDownloads("", 0, "");
+            } catch (IOException ignored) {
+                // the launcher gives up by itself
+            }
+        }
+        return false;
+    }
+
+    private static Object field(Object owner, String name) throws Exception {
+        java.lang.reflect.Field f = owner.getClass().getDeclaredField(name);
+        f.setAccessible(true);
+        return f.get(owner);
+    }
+
+    private static void watchDownloads(final String extension, final long size, final String sha1)
+            throws IOException {
+        final String caller = Bridge.caller();
+        Bridge.Reply reply = Bridge.INSTANCE.call(Bridge.WATCH_DOWNLOADS, new Bridge.Body() {
+            public void write(DataOutputStream out) throws IOException {
+                Bridge.writeString(out, extension);
+                out.writeLong(size);
+                Bridge.writeString(out, sha1);
+                Bridge.writeString(out, caller);
+            }
+        }, 15000);
+        String error = reply.error();
+        if (error != null) Main.log("OneClient won't watch downloads: " + error);
+    }
+
     // ---- Poly+'s pack screen (PackFiles#toTrash)
 
     /**

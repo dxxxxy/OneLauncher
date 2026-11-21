@@ -61,6 +61,14 @@ pub enum Request {
     Trash { path: String, caller: String },
     /// Select a file inside the instance in the user's file manager
     Reveal { path: String, caller: String },
+    /// A mod waits for the user to download one exact file in their browser
+    /// (Resourcify's manual downloads); an empty `sha1` stops waiting
+    WatchDownloads {
+        extension: String,
+        size: u64,
+        sha1: String,
+        caller: String,
+    },
 }
 
 /// One of the user's accounts as the game may see it: never a token
@@ -157,6 +165,7 @@ const SWITCH_ACCOUNT: u8 = 7;
 const ADD_ACCOUNT: u8 = 8;
 const TRASH: u8 = 9;
 const REVEAL: u8 = 10;
+const WATCH_DOWNLOADS: u8 = 11;
 
 const OK: u8 = 0x81;
 const HTTP_REPLY: u8 = 0x82;
@@ -183,6 +192,10 @@ impl Writer {
     }
 
     fn u16(&mut self, value: u16) {
+        self.0.extend_from_slice(&value.to_be_bytes());
+    }
+
+    fn u64(&mut self, value: u64) {
         self.0.extend_from_slice(&value.to_be_bytes());
     }
 
@@ -234,6 +247,10 @@ impl Reader<'_> {
 
     fn u32(&mut self) -> io::Result<u32> {
         Ok(u32::from_be_bytes(self.take(4)?.try_into().unwrap()))
+    }
+
+    fn u64(&mut self) -> io::Result<u64> {
+        Ok(u64::from_be_bytes(self.take(8)?.try_into().unwrap()))
     }
 
     fn bytes(&mut self) -> io::Result<Vec<u8>> {
@@ -331,6 +348,19 @@ pub fn encode_request(id: u32, request: &Request) -> Vec<u8> {
             w.string(caller);
             w.frame()
         }
+        Request::WatchDownloads {
+            extension,
+            size,
+            sha1,
+            caller,
+        } => {
+            let mut w = Writer::new(id, WATCH_DOWNLOADS);
+            w.string(extension);
+            w.u64(*size);
+            w.string(sha1);
+            w.string(caller);
+            w.frame()
+        }
     }
 }
 
@@ -385,6 +415,12 @@ pub fn decode_request(payload: &[u8]) -> io::Result<(u32, Request)> {
         },
         REVEAL => Request::Reveal {
             path: r.string()?,
+            caller: r.string()?,
+        },
+        WATCH_DOWNLOADS => Request::WatchDownloads {
+            extension: r.string()?,
+            size: r.u64()?,
+            sha1: r.string()?,
             caller: r.string()?,
         },
         other => return Err(invalid(format!("unknown request kind {other}"))),
@@ -535,6 +571,12 @@ mod tests {
         round_trip_request(Request::Reveal {
             path: "/instance/resourcepacks/old.zip".into(),
             caller: String::new(),
+        });
+        round_trip_request(Request::WatchDownloads {
+            extension: "zip".into(),
+            size: 5 * 1024 * 1024 * 1024,
+            sha1: "da39a3ee5e6b4b0d3255bfef95601890afd80709".into(),
+            caller: "resourcify".into(),
         });
         round_trip_request(Request::Pick {
             mode: PickMode::SaveFile,

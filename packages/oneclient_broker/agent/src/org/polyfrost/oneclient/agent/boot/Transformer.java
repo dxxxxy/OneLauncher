@@ -141,6 +141,23 @@ final class Transformer implements ClassFileTransformer {
     private static final List<Target> PP_PACKS = Arrays.asList(
             new Target("toTrash", "(Ljava/nio/file/Path;)Z", false, 2, "ppTrash", Kind.INT, null));
 
+    /**
+     * Resourcify's manual downloads wait for a file in ~/Downloads, which in
+     * the sandbox is the game's own empty home (see Hooks#rfWatch). The tick
+     * is the first point the screen knows what it waits for; 1.8.9 calls it
+     * updateScreen, by its SRG name at runtime
+     */
+    private static final String RF_SCREEN = "dev/dediamondpro/resourcify/gui/DownloadWatcherScreen";
+    private static final List<Target> RF_WATCHER = Arrays.asList(
+            new Target("tick", "()V", false, 1, "rfWatch", Kind.VOID_BOOL, null),
+            new Target("updateScreen", "()V", false, 1, "rfWatch", Kind.VOID_BOOL, null),
+            new Target("func_73876_c", "()V", false, 1, "rfWatch", Kind.VOID_BOOL, null),
+            new Target("onClose", "()V", false, 1, "rfStop", Kind.VOID_BOOL, null),
+            new Target("onGuiClosed", "()V", false, 1, "rfStop", Kind.VOID_BOOL, null),
+            new Target("func_146281_b", "()V", false, 1, "rfStop", Kind.VOID_BOOL, null));
+    private static final List<Target> RF_COMPANION = Arrays.asList(
+            new Target("isUsable", "()Z", false, 1, "rfUsable", Kind.INT, null));
+
     /** Poly+'s shaded Ktor CIO engine, which does its own TLS (see Ktor) */
     private static final String PP_CIO = "org/polyfrost/polyplus/libs/ktor/client/engine/cio/CIOEngine";
     private static final List<Target> KTOR_CIO = Arrays.asList(
@@ -205,6 +222,8 @@ final class Transformer implements ClassFileTransformer {
             else if (name.equals("java/awt/Dialog")) targets = AWT_DIALOG;
             else if (name.equals("org/lwjgl/glfw/GLFW")) targets = GLFW;
             else if (name.equals(PP_PACK_FILES)) targets = PP_PACKS;
+            else if (name.equals(RF_SCREEN)) targets = RF_WATCHER;
+            else if (name.equals(RF_SCREEN + "$Companion")) targets = RF_COMPANION;
             else return null;
 
             return remember(loader, name, Patcher.patch(bytes, targets));

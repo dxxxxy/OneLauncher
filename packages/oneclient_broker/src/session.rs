@@ -64,6 +64,44 @@ pub trait BrokerHost: Send + Sync + 'static {
     fn trash(&self, _path: PathBuf) -> BoxFuture<'_, Result<(), String>> {
         Box::pin(async { Err("the trash isn't available".into()) })
     }
+    /// Watch the user's real Downloads folder for this one file and copy it
+    /// where the game waits for it; `None` stops watching
+    fn watch_downloads(&self, _wanted: Option<WantedDownload>) {}
+}
+
+/// A file a mod sent the user to download in their browser. Only a file
+/// with exactly this content is ever handed to the game
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WantedDownload {
+    /// Lowercase, without the dot
+    pub extension: String,
+    pub size: u64,
+    /// Lowercase hex
+    pub sha1: String,
+    pub caller: String,
+}
+
+impl WantedDownload {
+    /// Downloads bigger than this aren't watched for
+    pub const MAX_SIZE: u64 = 1024 * 1024 * 1024;
+
+    pub fn new(extension: &str, size: u64, sha1: &str, caller: String) -> Option<Self> {
+        let extension = extension.trim_start_matches('.').to_ascii_lowercase();
+        let sha1 = sha1.to_ascii_lowercase();
+        let valid = !extension.is_empty()
+            && extension.len() <= 16
+            && extension.chars().all(|c| c.is_ascii_alphanumeric())
+            && sha1.len() == 40
+            && sha1.chars().all(|c| c.is_ascii_hexdigit())
+            && size > 0
+            && size <= Self::MAX_SIZE;
+        valid.then_some(Self {
+            extension,
+            size,
+            sha1,
+            caller,
+        })
+    }
 }
 
 /// A yes/no question for the user, shown by the launcher
@@ -343,6 +381,24 @@ pub(crate) async fn handle(shared: &Shared, request: Request) -> Reply {
                     });
                     Reply::Error("OneClient only shows files inside this instance".into())
                 }
+            }
+        }
+        Request::WatchDownloads {
+            extension,
+            size,
+            sha1,
+            caller,
+        } => {
+            if sha1.is_empty() {
+                shared.host.watch_downloads(None);
+                return Reply::Ok;
+            }
+            match WantedDownload::new(&extension, size, &sha1, caller) {
+                Some(wanted) => {
+                    shared.host.watch_downloads(Some(wanted));
+                    Reply::Ok
+                }
+                None => Reply::Error("not a download OneClient can watch for".into()),
             }
         }
         Request::Trash { path, caller } => {

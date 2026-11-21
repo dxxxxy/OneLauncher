@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use oneclient_auth::AuthService;
 use oneclient_broker::{
     Activity, ActivityKind, BoxFuture, BrokerHost, ConfirmPrompt, GameAccount, OpenTarget,
-    PickMode, PickRequest,
+    PickMode, PickRequest, WantedDownload,
 };
 use oneclient_events::EventBus;
 use uuid::Uuid;
@@ -25,12 +25,24 @@ pub struct LauncherBrokerHost {
     /// The folder the user last agreed to import from, and when: dropping
     /// several files at once asks once
     recent_import: parking_lot::Mutex<Option<(PathBuf, Instant)>>,
+    /// Watching the user's Downloads folder for a file a mod waits for
+    downloads_watch: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl Drop for LauncherBrokerHost {
+    fn drop(&mut self) {
+        if let Some(watch) = self.downloads_watch.get_mut().take() {
+            watch.abort();
+        }
+    }
 }
 
 /// How long the launcher waits for an answer before refusing
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(60);
 /// Further drops from the same folder within this time don't ask again
 const IMPORT_GRACE: Duration = Duration::from_secs(30);
+/// How long a mod may wait for the user to download a file
+const DOWNLOAD_WATCH: Duration = Duration::from_secs(15 * 60);
 
 impl LauncherBrokerHost {
     pub(crate) fn new(
@@ -48,8 +60,60 @@ impl LauncherBrokerHost {
             events: state.services.events.clone(),
             security: Arc::clone(&state.security),
             recent_import: parking_lot::Mutex::new(None),
+            downloads_watch: parking_lot::Mutex::new(None),
         }
     }
+}
+
+/// Waits for `wanted` to show up in `downloads` and copies it into `into`.
+/// Only a file with exactly the size and hash the mod named is copied, so
+/// the game learns nothing else about the folder
+async fn watch_downloads(
+    downloads: PathBuf,
+    into: PathBuf,
+    wanted: WantedDownload,
+) -> Option<(PathBuf, PathBuf)> {
+    let until = Instant::now() + DOWNLOAD_WATCH;
+    // files already hashed, by name and modification time
+    let mut seen = std::collections::HashSet::new();
+    while Instant::now() < until {
+        if let Ok(mut entries) = tokio::fs::read_dir(&downloads).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                let extension = path
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_ascii_lowercase());
+                if extension.as_deref() != Some(wanted.extension.as_str()) {
+                    continue;
+                }
+                let Ok(metadata) = entry.metadata().await else {
+                    continue;
+                };
+                if !metadata.is_file() || metadata.len() != wanted.size {
+                    continue;
+                }
+                if !seen.insert((path.clone(), metadata.modified().ok())) {
+                    continue;
+                }
+                if polyio::sha1_file(&path).await.ok().as_deref() != Some(wanted.sha1.as_str()) {
+                    continue;
+                }
+                let name = path.file_name()?.to_owned();
+                tokio::fs::create_dir_all(&into).await.ok()?;
+                // the mod watches the folder: it should only ever see the whole file
+                let part = into.join(format!(".{}.part", uuid::Uuid::new_v4().simple()));
+                tokio::fs::copy(&path, &part).await.ok()?;
+                let copy = into.join(name);
+                if tokio::fs::rename(&part, &copy).await.is_err() {
+                    let _ = tokio::fs::remove_file(&part).await;
+                    return None;
+                }
+                return Some((path, copy));
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    None
 }
 
 impl BrokerHost for LauncherBrokerHost {
@@ -219,6 +283,57 @@ impl BrokerHost for LauncherBrokerHost {
             .send();
     }
 
+    fn watch_downloads(&self, wanted: Option<WantedDownload>) {
+        let mut slot = self.downloads_watch.lock();
+        if let Some(previous) = slot.take() {
+            previous.abort();
+        }
+        let Some(wanted) = wanted else {
+            return;
+        };
+        if !self.sandboxed {
+            return;
+        }
+        let Some(downloads) = directories::UserDirs::new()
+            .and_then(|dirs| dirs.download_dir().map(Path::to_path_buf))
+        else {
+            return;
+        };
+        // where the mod looks: Downloads in the game's own home folder
+        let into = self
+            .cluster_dir
+            .join(".oneclient")
+            .join("home")
+            .join("Downloads");
+        let cluster_id = self.cluster_id;
+        let cluster_name = self.cluster_name.clone();
+        let events = self.events.clone();
+        let security = Arc::clone(&self.security);
+        *slot = Some(tokio::spawn(async move {
+            let caller = wanted.caller.clone();
+            let Some((from, copy)) = watch_downloads(downloads, into, wanted).await else {
+                return;
+            };
+            let name = copy
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            events
+                .notify(format!("Gave {cluster_name} your download"))
+                .body(format!("{name} is in the game now."))
+                .info()
+                .send();
+            security.push(Activity::now(
+                cluster_id,
+                ActivityKind::Imported {
+                    from: from.display().to_string(),
+                    to: Some(copy.display().to_string()),
+                    caller,
+                },
+            ));
+        }));
+    }
+
     fn reveal(&self, file: PathBuf) {
         if let Some(ui) = self.security.ui() {
             ui.reveal(&file);
@@ -386,5 +501,35 @@ impl LauncherBrokerHost {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn only_the_exact_download_is_handed_over() {
+        let root = std::env::temp_dir().join(format!("oneclient-downloads-{}", Uuid::new_v4()));
+        let downloads = root.join("Downloads");
+        let into = root.join("instance");
+        std::fs::create_dir_all(&downloads).unwrap();
+        // same size and extension, other content; still downloading; the one
+        std::fs::write(downloads.join("decoy.zip"), b"other").unwrap();
+        std::fs::write(downloads.join("pack.zip.crdownload"), b"right").unwrap();
+        std::fs::write(downloads.join("Pack.ZIP"), b"right").unwrap();
+        let sha1 = polyio::sha1_file(downloads.join("Pack.ZIP")).await.unwrap();
+
+        let wanted = WantedDownload::new("zip", 5, &sha1, "resourcify".into()).unwrap();
+        let (from, copy) = watch_downloads(downloads.clone(), into.clone(), wanted)
+            .await
+            .unwrap();
+        assert_eq!(from, downloads.join("Pack.ZIP"));
+        assert_eq!(copy, into.join("Pack.ZIP"));
+        assert_eq!(std::fs::read(&copy).unwrap(), b"right");
+        // nothing else, and no leftovers
+        assert_eq!(std::fs::read_dir(&into).unwrap().count(), 1);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

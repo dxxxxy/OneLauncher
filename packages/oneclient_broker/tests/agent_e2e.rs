@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use oneclient_broker::{
     Activity, ActivityKind, BoxFuture, BrokerHost, ConfirmPrompt, GameAccount, LaunchDescriptor,
-    OpenTarget, PickRequest,
+    OpenTarget, PickRequest, WantedDownload,
 };
 use uuid::Uuid;
 
@@ -19,6 +19,7 @@ struct Host {
     asked: Mutex<Vec<String>>,
     revealed: Mutex<Vec<PathBuf>>,
     trashed: Mutex<Vec<PathBuf>>,
+    watched: Mutex<Vec<Option<WantedDownload>>>,
 }
 
 impl BrokerHost for Host {
@@ -75,6 +76,10 @@ impl BrokerHost for Host {
     fn trash(&self, path: PathBuf) -> BoxFuture<'_, Result<(), String>> {
         self.trashed.lock().unwrap().push(path);
         Box::pin(async { Ok(()) })
+    }
+
+    fn watch_downloads(&self, wanted: Option<WantedDownload>) {
+        self.watched.lock().unwrap().push(wanted);
     }
 }
 
@@ -187,6 +192,27 @@ public class Probe {
         System.out.println("trashed=" + packFiles.getMethod("trash", java.nio.file.Path.class).invoke(files, old));
         System.out.println("revealed=" + packFiles.getMethod("reveal", java.nio.file.Path.class).invoke(files, old));
 
+        // Resourcify's manual download: the screen ticks twice, then closes
+        String rf = "dev/dediamondpro/resourcify/gui/";
+        java.nio.file.Path rfSource = stubs.resolve(rf + "DownloadWatcherScreen.java");
+        java.nio.file.Files.createDirectories(rfSource.getParent());
+        java.nio.file.Files.write(rfSource, ("package dev.dediamondpro.resourcify.gui;"
+            + " public class DownloadWatcherScreen { private final String extension = \"zip\";"
+            + " private final long size = 1234; private final String sha1 = \"DA39A3EE5E6B4B0D3255BFEF95601890AFD80709\";"
+            + " public static final Companion Companion = new Companion();"
+            + " public static class Companion { public boolean isUsable() {"
+            + "  return new java.io.File(System.getProperty(\"user.home\"), \"Downloads\").isDirectory(); } }"
+            + " public void tick() {} public void onClose() {} }").getBytes("UTF-8"));
+        javax.tools.ToolProvider.getSystemJavaCompiler().run(null, null, null, "-d", stubs.toString(),
+            rfSource.toString());
+        Class<?> watcher = stubLoader.loadClass("dev.dediamondpro.resourcify.gui.DownloadWatcherScreen");
+        Object companion = watcher.getField("Companion").get(null);
+        System.out.println("usable=" + companion.getClass().getMethod("isUsable").invoke(companion));
+        Object screen = watcher.getConstructor().newInstance();
+        watcher.getMethod("tick").invoke(screen);
+        watcher.getMethod("tick").invoke(screen);
+        watcher.getMethod("onClose").invoke(screen);
+
         // jagrosh-style Discord IPC: the pipe opened as a file
         if (System.getProperty("os.name").startsWith("Windows")) {
             java.io.RandomAccessFile pipe = new java.io.RandomAccessFile("\\\\?\\pipe\\discord-ipc-0", "rw");
@@ -294,6 +320,7 @@ async fn the_agent_routes_account_requests_through_the_broker() {
         "switched=true",
         "trashed=true",
         "revealed=0",
+        "usable=true",
     ];
     if cfg!(windows) {
         expected.push("discord=k");
@@ -343,6 +370,19 @@ async fn the_agent_routes_account_requests_through_the_broker() {
     let old = std::fs::canonicalize(&packs).unwrap().join("old.zip");
     assert_eq!(host.trashed.lock().unwrap().as_slice(), &[old.clone()]);
     assert_eq!(host.revealed.lock().unwrap().as_slice(), &[old]);
+    // one watch for the screen however often it ticks, stopped on close
+    assert_eq!(
+        host.watched.lock().unwrap().as_slice(),
+        &[
+            WantedDownload::new(
+                "zip",
+                1234,
+                "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+                "dev.dediamondpro.resourcify.gui.DownloadWatcherScreen".into()
+            ),
+            None
+        ]
+    );
     assert_eq!(
         host.imported.lock().unwrap().as_slice(),
         &[PathBuf::from("/oneclient-e2e-missing/pack3.zip")]
