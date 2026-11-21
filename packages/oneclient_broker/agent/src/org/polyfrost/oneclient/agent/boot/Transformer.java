@@ -43,6 +43,10 @@ final class Transformer implements ClassFileTransformer {
             new Target("<init>", "(Ljava/lang/String;Ljava/lang/String;)V", false, 1, "discordPipeName",
                     Kind.REWRITE, "java/lang/String"));
 
+    private static final List<Target> FILE = Arrays.asList(
+            new Target("<init>", "(Ljava/lang/String;)V", false, 1, "discordPipeName", Kind.REWRITE,
+                    "java/lang/String"));
+
     private static final List<Target> HTTP_CLIENT = Arrays.asList(
             new Target("send", "(Ljava/net/http/HttpRequest;Ljava/net/http/HttpResponse$BodyHandler;)"
                     + "Ljava/net/http/HttpResponse;", false, 3, "httpSend", Kind.OBJECT, "java/net/http/HttpResponse"),
@@ -67,6 +71,9 @@ final class Transformer implements ClassFileTransformer {
             if (!Hooks.sandboxed) return null;
             if (name.equals("java/io/RandomAccessFile")) {
                 return Hooks.discordRelay == null ? null : Patcher.patch(bytes, RANDOM_ACCESS_FILE);
+            }
+            if (name.equals("java/io/File")) {
+                return Hooks.discordRelay == null ? null : Patcher.patch(bytes, FILE);
             }
             if (name.equals("java/lang/ProcessBuilder")) targets = PROCESS_BUILDER;
             else if (name.equals("java/awt/Desktop")) targets = DESKTOP;

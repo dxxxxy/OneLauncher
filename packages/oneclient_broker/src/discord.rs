@@ -30,6 +30,9 @@ const FRAME: u32 = 1;
 const CLOSE: u32 = 2;
 const PING: u32 = 3;
 const PONG: u32 = 4;
+/// Windows: pipe instances kept waiting for the game at once
+#[cfg(windows)]
+const LISTENERS: usize = 4;
 /// Presence payloads are a few KB; anything bigger isn't rich presence
 const MAX_FRAME: usize = 64 * 1024;
 
@@ -174,9 +177,15 @@ impl DiscordRelay {
     }
 }
 
-fn handle(cluster_id: i64, host: Arc<dyn BrokerHost>, connect: Connect, game: Box<dyn Stream>) {
+fn handle(cluster_id: i64, host: Arc<dyn BrokerHost>, connect: Connect, mut game: Box<dyn Stream>) {
     tokio::spawn(async move {
-        let discord = match connect().await {
+        // libraries check the pipe exists by opening and closing it; only
+        // a real handshake is worth a connection to Discord
+        let hello = match read_frame(&mut game).await {
+            Ok(Some((HANDSHAKE, body))) => body,
+            _ => return,
+        };
+        let mut discord = match connect().await {
             Ok(discord) => discord,
             // Discord isn't running; the game's library sees a closed pipe and retries later
             Err(err) => {
@@ -184,6 +193,10 @@ fn handle(cluster_id: i64, host: Arc<dyn BrokerHost>, connect: Connect, game: Bo
                 return;
             }
         };
+        if let Err(err) = write_frame(&mut discord, HANDSHAKE, &hello).await {
+            tracing::debug!("Discord closed the relay: {err}");
+            return;
+        }
         let result = relay(game, discord, |command| {
             tracing::info!(cluster_id, %command, "refused a Discord command from the game");
             host.record(Activity::now(
@@ -281,31 +294,48 @@ impl DiscordRelay {
             r"\\.\pipe\oneclient-discord-{}",
             uuid::Uuid::new_v4().simple()
         );
-        let security = windows::security(app_container_sid)?;
-        let mut server = windows::create(&name, &security, true)?;
+        let security = Arc::new(windows::security(app_container_sid)?);
+        // the first instance claims the name; a few more wait alongside so a
+        // library's existence check never leaves the pipe busy for its open
+        let mut servers = vec![windows::create(&name, &security, true)?];
+        for _ in 1..LISTENERS {
+            servers.push(windows::create(&name, &security, false)?);
+        }
         let pipe = name.clone();
         let task = tokio::spawn(async move {
-            loop {
-                if let Err(err) = server.connect().await {
-                    tracing::debug!("Discord relay could not accept: {err}");
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    continue;
-                }
-                let next = match windows::create(&pipe, &security, false) {
-                    Ok(next) => next,
-                    Err(err) => {
-                        tracing::warn!("Discord relay stopped: {err}");
-                        return;
-                    }
-                };
-                let game = std::mem::replace(&mut server, next);
-                handle(
-                    cluster_id,
+            let mut listeners = tokio::task::JoinSet::new();
+            for mut server in servers {
+                let (pipe, security, host, connect) = (
+                    pipe.clone(),
+                    Arc::clone(&security),
                     Arc::clone(&host),
                     Arc::clone(&connect),
-                    Box::new(game),
                 );
+                listeners.spawn(async move {
+                    loop {
+                        if let Err(err) = server.connect().await {
+                            tracing::debug!("Discord relay could not accept: {err}");
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            continue;
+                        }
+                        let next = match windows::create(&pipe, &security, false) {
+                            Ok(next) => next,
+                            Err(err) => {
+                                tracing::warn!("Discord relay listener stopped: {err}");
+                                return;
+                            }
+                        };
+                        let game = std::mem::replace(&mut server, next);
+                        handle(
+                            cluster_id,
+                            Arc::clone(&host),
+                            Arc::clone(&connect),
+                            Box::new(game),
+                        );
+                    }
+                });
             }
+            while listeners.join_next().await.is_some() {}
         });
         Ok(Self {
             path: name.into(),
@@ -541,6 +571,8 @@ mod tests {
         assert!(relay.jvm_property().unwrap().contains("oneclient-discord-"));
 
         for _ in 0..2 {
+            // what File.exists() does: open and close at once
+            drop(ClientOptions::new().open(relay.path()).unwrap());
             let mut game = ClientOptions::new().open(relay.path()).unwrap();
             send(&mut game, HANDSHAKE, json!({"v": 1})).await;
             assert_eq!(next(&mut game).await.0, HANDSHAKE);

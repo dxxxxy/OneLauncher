@@ -41,11 +41,13 @@ def build() -> bytes:
              "-encoding", "UTF-8", "-d", str(out), *sources],
             check=True,
         )
-        # Java 11+ only parts (java.net.http), loaded by name when present
+        # Java 11+ only parts (java.net.http), stored as .class11 for
+        # ModuleLoader so mod loaders scanning the class path skip them
+        out11 = pathlib.Path(tmp) / "classes11"
         modern = sorted(str(p) for p in SRC11.rglob("*.java"))
         subprocess.run(
             ["javac", "--release", "11", "-g:source,lines", "-encoding", "UTF-8",
-             "-cp", str(out), "-d", str(out), *modern],
+             "-cp", str(out), "-d", str(out11), *modern],
             check=True,
         )
         jar_path = pathlib.Path(tmp) / "agent.jar"
@@ -60,6 +62,8 @@ def build() -> bytes:
             add("META-INF/MANIFEST.MF", MANIFEST.encode())
             for path in sorted(out.rglob("*.class")):
                 add(path.relative_to(out).as_posix(), path.read_bytes())
+            for path in sorted(out11.rglob("*.class")):
+                add(path.relative_to(out11).as_posix() + "11", path.read_bytes())
         return jar_path.read_bytes()
 
 

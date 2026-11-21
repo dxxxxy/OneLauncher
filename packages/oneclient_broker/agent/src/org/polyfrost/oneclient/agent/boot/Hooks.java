@@ -23,13 +23,14 @@ public final class Hooks {
 
     private Hooks() {}
 
-    // ---- java.io.RandomAccessFile(File, String): Discord IPC
+    // ---- java.io.File(String) and RandomAccessFile: Discord IPC
 
     /**
-     * Java Discord IPC libraries open {@code \\?\pipe\discord-ipc-N} as a file.
-     * The sandbox can't reach Discord's own pipe, so they get the launcher's
-     * relay instead, which passes on rich presence and nothing else. Runs on
-     * every RandomAccessFile, so it stays cheap and never throws.
+     * Java Discord IPC libraries open {@code \\?\pipe\discord-ipc-N} as a file,
+     * usually after checking {@code new File(path).exists()}. The sandbox
+     * can't reach Discord's own pipe, so the name becomes the launcher's
+     * relay, which passes on rich presence and nothing else. Runs on every
+     * File and RandomAccessFile, so it stays cheap and never throws.
      */
     public static Object discordPipe(Object file) {
         String relay = discordRelay;
@@ -37,20 +38,44 @@ public final class Hooks {
         return new File(relay);
     }
 
-    /** The same for {@code RandomAccessFile(String, String)}, before File reshapes the name. */
+    /** The same for constructors that take the name as a string. */
     public static Object discordPipeName(Object name) {
         String relay = discordRelay;
         if (relay == null || !(name instanceof String) || !isDiscordPipe((String) name)) return name;
         return relay;
     }
 
+    /**
+     * {@code \\?\pipe\discord-ipc-N} or {@code \\.\pipe\discord-ipc-N}, with
+     * either slash and any number of them (CraftPresence doubles every one).
+     */
     static boolean isDiscordPipe(String path) {
-        int prefix = 21; // \\?\pipe\discord-ipc-
-        if (path.length() <= prefix || path.length() > prefix + 2) return false;
-        String head = path.substring(0, prefix).toLowerCase(Locale.ROOT).replace('/', '\\');
-        if (!head.equals("\\\\?\\pipe\\discord-ipc-") && !head.equals("\\\\.\\pipe\\discord-ipc-")) return false;
-        for (int i = prefix; i < path.length(); i++) {
-            if (!Character.isDigit(path.charAt(i))) return false;
+        int length = path.length();
+        if (length < 20 || length > 64) return false;
+        char last = path.charAt(length - 1);
+        if (last < '0' || last > '9') return false; // nearly every path ends in a letter
+        StringBuilder clean = new StringBuilder(length);
+        boolean separator = false;
+        for (int i = 0; i < length; i++) {
+            char c = path.charAt(i);
+            if (c == '/' || c == '\\') {
+                if (!separator) clean.append('\\');
+                separator = true;
+            } else {
+                clean.append(Character.toLowerCase(c));
+                separator = false;
+            }
+        }
+        String name = clean.toString();
+        String rest;
+        if (name.startsWith("\\?\\pipe\\discord-ipc-") || name.startsWith("\\.\\pipe\\discord-ipc-")) {
+            rest = name.substring(20);
+        } else {
+            return false;
+        }
+        if (rest.isEmpty() || rest.length() > 2) return false;
+        for (int i = 0; i < rest.length(); i++) {
+            if (!Character.isDigit(rest.charAt(i))) return false;
         }
         return true;
     }

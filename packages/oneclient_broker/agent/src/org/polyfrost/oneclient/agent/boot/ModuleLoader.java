@@ -10,6 +10,11 @@ import java.io.InputStream;
  * such as {@code java.net.http} (they belong to the platform loader), so
  * code that uses them is defined here instead. Everything outside the
  * package still resolves to the boot loader's copy.
+ *
+ * <p>Those classes are stored as {@code .class11} so nothing else picks them
+ * up: the boot loader would define them where they can't link, and old mod
+ * loaders that scan the class path (Forge 1.8.9's ASM 5) choke on Java 11
+ * class files.
  */
 final class ModuleLoader extends ClassLoader {
     private final String prefix;
@@ -31,7 +36,7 @@ final class ModuleLoader extends ClassLoader {
     }
 
     private Class<?> define(String name) throws ClassNotFoundException {
-        String resource = name.replace('.', '/') + ".class";
+        String resource = name.replace('.', '/') + ".class11";
         InputStream in = ClassLoader.getSystemResourceAsStream(resource);
         if (in == null) throw new ClassNotFoundException(name);
         try {
