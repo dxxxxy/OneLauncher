@@ -15,7 +15,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::activity::{Activity, ActivityKind};
-use crate::limiter::JoinLimiter;
+use crate::limiter::{JoinLimiter, Take};
 use crate::policy::{self, AccountChange, ChangeKind, Decision, Route, TokenPlacement};
 use crate::protocol::{self, GameAccount, PickFilter, PickMode, Reply, Request};
 
@@ -458,13 +458,15 @@ async fn http(
                 });
                 return forbidden();
             }
-            let allowed = shared
+            let take = shared
                 .joins
                 .lock()
                 .map(|mut l| l.try_take())
-                .unwrap_or(false);
-            if !allowed {
-                shared.record(ActivityKind::JoinLimited { caller });
+                .unwrap_or(Take::Paused { first: false });
+            if let Take::Paused { first } = take {
+                if first {
+                    shared.record(ActivityKind::JoinLimited { caller });
+                }
                 return Reply::Http {
                     status: 429,
                     headers: vec![],

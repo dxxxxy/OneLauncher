@@ -9,6 +9,16 @@ pub struct JoinLimiter {
     tokens: f64,
     per_token: Duration,
     last: Instant,
+    paused: bool,
+}
+
+/// What [`JoinLimiter::try_take`] decided
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Take {
+    Allowed,
+    /// Refused; `first` for the first refusal since the last allowed join,
+    /// so a mod retrying in a loop is reported once rather than every time
+    Paused { first: bool },
 }
 
 impl JoinLimiter {
@@ -23,23 +33,27 @@ impl JoinLimiter {
             tokens: f64::from(capacity),
             per_token,
             last: Instant::now(),
+            paused: false,
         }
     }
 
-    pub fn try_take(&mut self) -> bool {
+    pub fn try_take(&mut self) -> Take {
         self.try_take_at(Instant::now())
     }
 
-    fn try_take_at(&mut self, now: Instant) -> bool {
+    fn try_take_at(&mut self, now: Instant) -> Take {
         let elapsed = now.saturating_duration_since(self.last);
         self.last = now;
         self.tokens =
             (self.tokens + elapsed.as_secs_f64() / self.per_token.as_secs_f64()).min(self.capacity);
         if self.tokens >= 1.0 {
             self.tokens -= 1.0;
-            true
+            self.paused = false;
+            Take::Allowed
         } else {
-            false
+            let first = !self.paused;
+            self.paused = true;
+            Take::Paused { first }
         }
     }
 }
@@ -54,10 +68,12 @@ mod tests {
         let mut limiter = JoinLimiter::new(2, Duration::from_secs(60));
         limiter.last = start;
 
-        assert!(limiter.try_take_at(start));
-        assert!(limiter.try_take_at(start));
-        assert!(!limiter.try_take_at(start + Duration::from_secs(30)));
-        assert!(limiter.try_take_at(start + Duration::from_secs(61)));
-        assert!(!limiter.try_take_at(start + Duration::from_secs(62)));
+        assert_eq!(limiter.try_take_at(start), Take::Allowed);
+        assert_eq!(limiter.try_take_at(start), Take::Allowed);
+        let later = |secs| start + Duration::from_secs(secs);
+        assert_eq!(limiter.try_take_at(later(30)), Take::Paused { first: true });
+        assert_eq!(limiter.try_take_at(later(31)), Take::Paused { first: false });
+        assert_eq!(limiter.try_take_at(later(61)), Take::Allowed);
+        assert_eq!(limiter.try_take_at(later(62)), Take::Paused { first: true });
     }
 }

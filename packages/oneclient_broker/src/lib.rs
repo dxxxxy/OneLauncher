@@ -406,22 +406,24 @@ mod tests {
         let shared = shared(host.clone());
         *shared.joins.lock().unwrap() = limiter::JoinLimiter::new(0, Duration::from_secs(3600));
 
-        let reply = session::handle(
-            &shared,
-            Request::Http {
-                method: "POST".into(),
-                url: "https://sessionserver.mojang.com/session/minecraft/join".into(),
-                headers: vec![],
-                body: br#"{"accessToken":"FAKE","selectedProfile":"00000000000000000000000000000001","serverId":"x"}"#.to_vec(),
-                caller: String::new(),
-            },
-        )
-        .await;
+        // a mod retrying in a loop is reported once, not on every refusal
+        for _ in 0..3 {
+            let reply = session::handle(
+                &shared,
+                Request::Http {
+                    method: "POST".into(),
+                    url: "https://sessionserver.mojang.com/session/minecraft/join".into(),
+                    headers: vec![],
+                    body: br#"{"accessToken":"FAKE","selectedProfile":"00000000000000000000000000000001","serverId":"x"}"#.to_vec(),
+                    caller: String::new(),
+                },
+            )
+            .await;
+            assert!(matches!(reply, Reply::Http { status: 429, .. }));
+        }
 
-        assert!(matches!(reply, Reply::Http { status: 429, .. }));
-        assert!(matches!(
-            host.log.lock().unwrap()[0].kind,
-            ActivityKind::JoinLimited { .. }
-        ));
+        let log = host.log.lock().unwrap();
+        assert_eq!(log.len(), 1);
+        assert!(matches!(log[0].kind, ActivityKind::JoinLimited { .. }));
     }
 }
