@@ -31,7 +31,7 @@ use uuid::Uuid;
 pub use activity::{Activity, ActivityKind};
 pub use discord::DiscordRelay;
 pub use protocol::{PickFilter, PickMode};
-pub use session::{BoxFuture, BrokerHost, OpenTarget, PickRequest, validate_open};
+pub use session::{BoxFuture, BrokerHost, ConfirmPrompt, OpenTarget, PickRequest, validate_open};
 use session::{SessionConfig, Shared};
 pub use transport::Endpoint;
 

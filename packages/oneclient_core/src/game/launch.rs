@@ -1620,17 +1620,8 @@ async fn protect_launch(
     let home = private.join("home");
     let temp = private.join("tmp");
     let metadata = paths::metadata_dir()?;
-    let host = |sandboxed| {
-        Arc::new(LauncherBrokerHost {
-            cluster_id: cluster.id,
-            cluster_name: cluster.name.clone(),
-            cluster_dir: cluster_dir.clone(),
-            sandboxed,
-            auth: Arc::clone(&state.auth),
-            events: state.services.events.clone(),
-            security: Arc::clone(&state.security),
-        })
-    };
+    let host =
+        |sandboxed| Arc::new(LauncherBrokerHost::new(state, cluster, cluster_dir.clone(), sandboxed));
 
     // Unix: the relay socket has to exist before the sandbox is built around it
     #[cfg(unix)]

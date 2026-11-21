@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use oneclient_auth::AuthService;
 use oneclient_broker::{
-    Activity, ActivityKind, BoxFuture, BrokerHost, OpenTarget, PickMode, PickRequest,
+    Activity, ActivityKind, BoxFuture, BrokerHost, ConfirmPrompt, OpenTarget, PickMode, PickRequest,
 };
 use oneclient_events::EventBus;
 use uuid::Uuid;
@@ -21,6 +21,34 @@ pub struct LauncherBrokerHost {
     pub(crate) auth: Arc<AuthService>,
     pub(crate) events: EventBus,
     pub(crate) security: Arc<SecurityService>,
+    /// The folder the user last agreed to import from, and when: dropping
+    /// several files at once asks once
+    recent_import: parking_lot::Mutex<Option<(PathBuf, Instant)>>,
+}
+
+/// How long the launcher waits for an answer before refusing
+const CONFIRM_TIMEOUT: Duration = Duration::from_secs(60);
+/// Further drops from the same folder within this time don't ask again
+const IMPORT_GRACE: Duration = Duration::from_secs(30);
+
+impl LauncherBrokerHost {
+    pub(crate) fn new(
+        state: &Arc<crate::state::LauncherState>,
+        cluster: &oneclient_cluster::Cluster,
+        cluster_dir: PathBuf,
+        sandboxed: bool,
+    ) -> Self {
+        Self {
+            cluster_id: cluster.id,
+            cluster_name: cluster.name.clone(),
+            cluster_dir,
+            sandboxed,
+            auth: Arc::clone(&state.auth),
+            events: state.services.events.clone(),
+            security: Arc::clone(&state.security),
+            recent_import: parking_lot::Mutex::new(None),
+        }
+    }
 }
 
 impl BrokerHost for LauncherBrokerHost {
@@ -119,10 +147,66 @@ impl BrokerHost for LauncherBrokerHost {
                 return Some(chosen);
             }
             match mode {
-                PickMode::OpenFile => self.import(&chosen).await,
+                PickMode::OpenFile => self.copy_in(&chosen).await,
                 PickMode::SaveFile => Some(self.export(chosen).await),
                 PickMode::OpenFolder => self.share_folder(chosen).await,
             }
+        })
+    }
+
+    fn confirm(&self, prompt: ConfirmPrompt) -> BoxFuture<'_, bool> {
+        Box::pin(async move {
+            let Some(ui) = self.security.ui() else {
+                return false;
+            };
+            tokio::time::timeout(CONFIRM_TIMEOUT, ui.confirm(prompt))
+                .await
+                .unwrap_or(false)
+        })
+    }
+
+    fn import(&self, from: PathBuf, _caller: String) -> BoxFuture<'_, Option<PathBuf>> {
+        Box::pin(async move {
+            if !self.sandboxed || !from.is_absolute() {
+                return None;
+            }
+            if let Some(reason) = oneclient_sandbox::sensitive_reason(&from) {
+                self.events
+                    .notify(format!("Blocked a mod in {}", self.cluster_name))
+                    .body(format!(
+                        "The game asked to copy in a file that holds {reason}. OneClient refused."
+                    ))
+                    .error()
+                    .send();
+                return None;
+            }
+            // only files: a folder could be the whole user profile
+            if !tokio::fs::metadata(&from).await.ok()?.is_file() {
+                return None;
+            }
+            let folder = from.parent()?.to_path_buf();
+            let name = from.file_name()?.to_string_lossy().to_string();
+            let recent = matches!(
+                &*self.recent_import.lock(),
+                Some((dir, at)) if *dir == folder && at.elapsed() < IMPORT_GRACE
+            );
+            if !recent {
+                let allowed = self
+                    .confirm(ConfirmPrompt {
+                        title: format!("Copy {name} into {}?", self.cluster_name),
+                        body: format!(
+                            "The game says you dropped this file onto its window:\n\n{}\n\nOneClient will copy it into the instance so the game can open it. If you didn't just drag a file into the game, choose Don't allow: a mod may be trying to read your files.",
+                            from.display()
+                        ),
+                        allow: "Copy it in".into(),
+                    })
+                    .await;
+                if !allowed {
+                    return None;
+                }
+            }
+            *self.recent_import.lock() = Some((folder, Instant::now()));
+            self.copy_in(&from).await
         })
     }
 }
@@ -166,7 +250,7 @@ fn unique_in(dir: &Path, name: &std::ffi::OsStr) -> PathBuf {
 impl LauncherBrokerHost {
     /// The sandbox can't see the user's files, so a picked file is copied
     /// into the instance and the game gets the copy
-    async fn import(&self, chosen: &Path) -> Option<PathBuf> {
+    async fn copy_in(&self, chosen: &Path) -> Option<PathBuf> {
         let dir = self.cluster_dir.join(".oneclient").join("imports");
         polyio::create_dir_all(&dir).await.ok()?;
         let target = unique_in(&dir, chosen.file_name()?);

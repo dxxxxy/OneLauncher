@@ -13,6 +13,7 @@ use uuid::Uuid;
 struct Host {
     log: Mutex<Vec<Activity>>,
     opened: Mutex<Vec<OpenTarget>>,
+    imported: Mutex<Vec<PathBuf>>,
 }
 
 impl BrokerHost for Host {
@@ -30,6 +31,11 @@ impl BrokerHost for Host {
 
     fn pick(&self, _request: PickRequest) -> BoxFuture<'_, Option<PathBuf>> {
         Box::pin(async { Some(PathBuf::from("picked.png")) })
+    }
+
+    fn import(&self, from: PathBuf, _caller: String) -> BoxFuture<'_, Option<PathBuf>> {
+        self.imported.lock().unwrap().push(from);
+        Box::pin(async { Some(PathBuf::from("imported.zip")) })
     }
 }
 
@@ -77,6 +83,20 @@ public class Probe {
             fd.setVisible(true);
             System.out.println("filedialog=" + fd.getFile() + "," + fd.getFiles().length);
         }
+
+        // GLFW's drop callback, compiled here as a stub and patched like the
+        // real one: a dropped file the game can't read gets copied in
+        java.nio.file.Path stubs = java.nio.file.Paths.get(args[2]);
+        java.nio.file.Path source = stubs.resolve("org/lwjgl/glfw/GLFWDropCallback.java");
+        java.nio.file.Files.createDirectories(source.getParent());
+        java.nio.file.Files.write(source, ("package org.lwjgl.glfw; public class GLFWDropCallback {"
+            + " public static String getName(long names, int index) {"
+            + " return \"/oneclient-e2e-missing/pack\" + index + \".zip\"; } }").getBytes("UTF-8"));
+        javax.tools.ToolProvider.getSystemJavaCompiler().run(null, null, null, "-d", stubs.toString(), source.toString());
+        URLClassLoader stubLoader = new URLClassLoader(new URL[] {stubs.toUri().toURL()});
+        Object dropped = stubLoader.loadClass("org.lwjgl.glfw.GLFWDropCallback")
+            .getMethod("getName", long.class, int.class).invoke(null, 0L, 3);
+        System.out.println("dropped=" + dropped);
 
         // jagrosh-style Discord IPC: the pipe opened as a file
         if (System.getProperty("os.name").startsWith("Windows")) {
@@ -159,6 +179,7 @@ async fn the_agent_routes_account_requests_through_the_broker() {
         .arg(dir.join("Probe.java"))
         .arg(&descriptor.fake_token)
         .arg(&packs)
+        .arg(dir.join("stubs"))
         .env(oneclient_broker::KEY_ENV, &descriptor.key)
         .current_dir(&dir);
     let output = tokio::time::timeout(std::time::Duration::from_secs(60), command.output())
@@ -172,7 +193,13 @@ async fn the_agent_routes_account_requests_through_the_broker() {
         stdout.contains("status=403"),
         "stdout: {stdout}\nstderr: {stderr}"
     );
-    let mut expected = vec!["opened=0", "folder=0", "modern=403", "async=403"];
+    let mut expected = vec![
+        "opened=0",
+        "folder=0",
+        "modern=403",
+        "async=403",
+        "dropped=imported.zip",
+    ];
     if cfg!(windows) {
         expected.push("discord=k");
         expected.push("filedialog=picked.png,1");
@@ -196,6 +223,11 @@ async fn the_agent_routes_account_requests_through_the_broker() {
             OpenTarget::Url("https://modrinth.com".parse().unwrap()),
             OpenTarget::Path(std::fs::canonicalize(&packs).unwrap()),
         ]
+    );
+
+    assert_eq!(
+        host.imported.lock().unwrap().as_slice(),
+        &[PathBuf::from("/oneclient-e2e-missing/pack3.zip")]
     );
 
     drop(broker);

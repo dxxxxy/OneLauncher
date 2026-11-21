@@ -13,7 +13,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use oneclient_broker::{Activity, PickRequest, RunningBroker};
+use oneclient_broker::{Activity, ConfirmPrompt, PickRequest, RunningBroker};
 use oneclient_common::paths;
 
 pub use host::LauncherBrokerHost;
@@ -25,6 +25,8 @@ pub trait SecurityUi: Send + Sync + 'static {
     fn open_path(&self, path: &Path);
     /// Show the native picker. `Save` returns the destination the user chose
     fn pick(&self, request: PickRequest) -> oneclient_broker::BoxFuture<'_, Option<PathBuf>>;
+    /// Ask the user a yes/no question over everything else
+    fn confirm(&self, prompt: ConfirmPrompt) -> oneclient_broker::BoxFuture<'_, bool>;
 }
 
 const ACTIVITY_LIMIT: usize = 500;
@@ -225,15 +227,12 @@ pub(crate) async fn resume_broker(
     let Ok(cluster_dir) = cluster.dir() else {
         return;
     };
-    let host = Arc::new(LauncherBrokerHost {
-        cluster_id: cluster.id,
-        cluster_name: cluster.name.clone(),
+    let host = Arc::new(LauncherBrokerHost::new(
+        state,
+        cluster,
         cluster_dir,
-        sandboxed: InstanceSecurity::load(cluster.id).await.sandbox,
-        auth: Arc::clone(&state.auth),
-        events: state.services.events.clone(),
-        security: Arc::clone(&state.security),
-    });
+        InstanceSecurity::load(cluster.id).await.sandbox,
+    ));
     match oneclient_broker::start(&descriptor, host, state.services.requester.http().clone()) {
         Ok(running) => {
             tracing::info!(

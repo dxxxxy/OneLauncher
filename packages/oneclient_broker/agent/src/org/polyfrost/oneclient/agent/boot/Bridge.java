@@ -28,7 +28,7 @@ final class Bridge {
     static final Bridge INSTANCE = new Bridge();
     static final Charset UTF8 = Charset.forName("UTF-8");
 
-    static final byte HELLO = 1, HTTP = 2, OPEN = 3, PICK = 4;
+    static final byte HELLO = 1, HTTP = 2, OPEN = 3, PICK = 4, IMPORT = 5;
     static final int OK = 0x81, HTTP_REPLY = 0x82, ERROR = 0x83, PICKED = 0x84;
 
     private final String up;

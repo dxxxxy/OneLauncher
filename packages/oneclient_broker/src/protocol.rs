@@ -48,6 +48,9 @@ pub enum Request {
         filters: Vec<String>,
         caller: String,
     },
+    /// The user dropped a file the sandbox can't read onto the game window.
+    /// The game can't prove that, so the launcher asks before copying it in
+    Import { path: String, caller: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +130,7 @@ const HELLO: u8 = 1;
 const HTTP: u8 = 2;
 const OPEN: u8 = 3;
 const PICK: u8 = 4;
+const IMPORT: u8 = 5;
 
 const OK: u8 = 0x81;
 const HTTP_REPLY: u8 = 0x82;
@@ -267,6 +271,12 @@ pub fn encode_request(id: u32, request: &Request) -> Vec<u8> {
             w.string(caller);
             w.frame()
         }
+        Request::Import { path, caller } => {
+            let mut w = Writer::new(id, IMPORT);
+            w.string(path);
+            w.string(caller);
+            w.frame()
+        }
     }
 }
 
@@ -301,6 +311,10 @@ pub fn decode_request(payload: &[u8]) -> io::Result<(u32, Request)> {
                 caller: r.string()?,
             }
         }
+        IMPORT => Request::Import {
+            path: r.string()?,
+            caller: r.string()?,
+        },
         other => return Err(invalid(format!("unknown request kind {other}"))),
     };
     Ok((id, request))
@@ -404,6 +418,10 @@ mod tests {
         round_trip_request(Request::Open {
             target: "https://example.com".into(),
             caller: String::new(),
+        });
+        round_trip_request(Request::Import {
+            path: r"C:\Users\me\Downloads\pack.zip".into(),
+            caller: "minecraft".into(),
         });
         round_trip_request(Request::Pick {
             mode: PickMode::SaveFile,

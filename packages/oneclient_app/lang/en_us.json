@@ -2650,5 +2650,7 @@
   "oneclient.cluster.security.activity.opened": "Opened %1$s",
   "oneclient.cluster.security.activity.open_refused": "Didn't open %1$s",
   "oneclient.cluster.security.activity.picked": "Shared a file you picked: %1$s",
+  "oneclient.cluster.security.activity.imported": "Copied in a file you dropped on the game: %1$s",
+  "oneclient.cluster.security.activity.import_refused": "Didn't copy in %1$s",
   "oneclient.cluster.security.activity.sensitive": "Blocked %1$s from reading %2$s"
 }

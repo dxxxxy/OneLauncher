@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use oneclient_broker::{BoxFuture, PickMode, PickRequest};
+use oneclient_broker::{BoxFuture, ConfirmPrompt, PickMode, PickRequest};
 use oneclient_core::security::SecurityUi;
 
 pub struct AppSecurityUi;
@@ -41,6 +41,28 @@ impl SecurityUi for AppSecurityUi {
                 PickMode::SaveFile => dialog.save_file().await,
             };
             handle.map(|h| h.path().to_path_buf())
+        })
+    }
+
+    fn confirm(&self, prompt: ConfirmPrompt) -> BoxFuture<'_, bool> {
+        Box::pin(async move {
+            crate::platform::focus_window();
+            let deny = "Don't allow".to_string();
+            let answer = rfd::AsyncMessageDialog::new()
+                .set_level(rfd::MessageLevel::Warning)
+                .set_title(&prompt.title)
+                .set_description(&prompt.body)
+                .set_buttons(rfd::MessageButtons::OkCancelCustom(
+                    prompt.allow.clone(),
+                    deny,
+                ))
+                .show()
+                .await;
+            match answer {
+                rfd::MessageDialogResult::Custom(label) => label == prompt.allow,
+                rfd::MessageDialogResult::Ok | rfd::MessageDialogResult::Yes => true,
+                _ => false,
+            }
         })
     }
 }

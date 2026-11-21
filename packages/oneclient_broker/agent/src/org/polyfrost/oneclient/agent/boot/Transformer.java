@@ -51,6 +51,14 @@ final class Transformer implements ClassFileTransformer {
     private static final List<Target> AWT_DIALOG = Arrays.asList(
             new Target("show", "()V", false, 1, "dialogShow", Kind.VOID_BOOL, null));
 
+    /** Files dropped on the window: 26.1+ (SDL) and 1.13 to 1.21 (GLFW) */
+    private static final List<Target> SDL_DROP = Arrays.asList(
+            new Target("dataString", "()Ljava/lang/String;", false, 1, "sdlDropData", Kind.OBJECT,
+                    "java/lang/String"));
+
+    private static final List<Target> GLFW_DROP = Arrays.asList(
+            new Target("getName", "(JI)Ljava/lang/String;", false, 0, "glfwDropName", Kind.TYPED, null));
+
     /** Returns a boolean, which the JVM treats as an int */
     private static final List<Target> SDL_MISC = Arrays.asList(
             new Target("SDL_OpenURL", "(Ljava/lang/CharSequence;)Z", false, 1, "sdlOpenUrl", Kind.INT, null));
@@ -141,6 +149,8 @@ final class Transformer implements ClassFileTransformer {
             else if (name.equals("org/lwjgl/sdl/SDLMisc")) targets = SDL_MISC;
             else if (name.equals("org/lwjgl/sdl/SDLVideo")) targets = SDL_VIDEO;
             else if (name.equals("org/lwjgl/sdl/SDLDialog")) targets = SDL_DIALOG;
+            else if (name.equals("org/lwjgl/sdl/SDL_DropEvent")) targets = SDL_DROP;
+            else if (name.equals("org/lwjgl/glfw/GLFWDropCallback")) targets = GLFW_DROP;
             else if (name.equals("java/awt/Dialog")) targets = AWT_DIALOG;
             else if (name.equals("org/lwjgl/glfw/GLFW")) targets = GLFW;
             else return null;

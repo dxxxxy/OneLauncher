@@ -618,6 +618,77 @@ public final class Hooks {
         }
     }
 
+    // ---- drag and drop
+
+    private static final ThreadLocal<Boolean> inDrop = new ThreadLocal<Boolean>();
+
+    /** 26.1+: SDL_DropEvent#dataString, a dropped file's path */
+    public static Object sdlDropData(Object event) throws Throwable {
+        if (!sandboxed || inDrop.get() != null) return PASS;
+        inDrop.set(Boolean.TRUE);
+        try {
+            return dropped((String) event.getClass().getMethod("dataString").invoke(event));
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            throw e.getCause();
+        } finally {
+            inDrop.remove();
+        }
+    }
+
+    /** 1.13 to 1.21: GLFWDropCallback#getName(names, index) */
+    public static Object glfwDropName(long names, int index) throws Throwable {
+        if (!sandboxed || inDrop.get() != null) return PASS;
+        inDrop.set(Boolean.TRUE);
+        try {
+            Class<?> callback = libraryClass("org.lwjgl.glfw.GLFWDropCallback", "org.lwjgl.glfw.GLFWDropCallback");
+            return dropped((String) callback.getMethod("getName", long.class, int.class)
+                    .invoke(null, Long.valueOf(names), Integer.valueOf(index)));
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            throw e.getCause();
+        } finally {
+            inDrop.remove();
+        }
+    }
+
+    /**
+     * Windows hands the game the dropped file's real path (Downloads, say),
+     * which the sandbox can't read, so dropping a pack or a world on the
+     * game did nothing. The launcher asks the user and copies the file into
+     * the instance; the game gets the copy. Paths it can already read, and
+     * anything the launcher refuses, pass through unchanged.
+     */
+    private static String dropped(final String path) {
+        if (path == null || path.isEmpty() || readable(path)) return path;
+        final String caller = Bridge.caller();
+        try {
+            Bridge.Reply reply = Bridge.INSTANCE.call(Bridge.IMPORT, new Bridge.Body() {
+                public void write(DataOutputStream out) throws IOException {
+                    Bridge.writeString(out, path);
+                    Bridge.writeString(out, caller);
+                }
+            }, 2L * 60L * 1000L);
+            if (reply.kind != Bridge.PICKED) return path;
+            boolean some = reply.body.readUnsignedByte() != 0;
+            String copy = Bridge.readString(reply.body);
+            return some ? copy : path;
+        } catch (IOException e) {
+            Main.log("could not import a dropped file: " + e.getMessage());
+            return path;
+        }
+    }
+
+    /** Folders count as readable: only files are imported */
+    private static boolean readable(String path) {
+        File file = new File(path);
+        if (file.isDirectory()) return true;
+        try {
+            new java.io.FileInputStream(file).close();
+            return true;
+        } catch (IOException denied) {
+            return false;
+        }
+    }
+
     // ---- java.awt.FileDialog
 
     /** Shows nothing: the launcher's picker runs instead and its answer goes into the dialog. */

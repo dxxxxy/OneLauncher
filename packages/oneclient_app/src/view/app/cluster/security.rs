@@ -79,6 +79,13 @@ fn describe(activity: &Activity) -> String {
             "oneclient.cluster.security.activity.picked",
             &[&path.as_deref().unwrap_or("-")],
         ),
+        ActivityKind::Imported { from, to: Some(_), .. } => {
+            tf("oneclient.cluster.security.activity.imported", &[from])
+        }
+        ActivityKind::Imported { from, to: None, .. } => tf(
+            "oneclient.cluster.security.activity.import_refused",
+            &[from],
+        ),
         ActivityKind::SensitiveAccess { path, caller } => tf(
             "oneclient.cluster.security.activity.sensitive",
             &[caller, path],

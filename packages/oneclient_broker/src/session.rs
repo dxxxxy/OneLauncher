@@ -29,6 +29,25 @@ pub trait BrokerHost: Send + Sync + 'static {
     /// Show a native picker outside the sandbox and make the choice reachable
     /// from inside it
     fn pick(&self, request: PickRequest) -> BoxFuture<'_, Option<PathBuf>>;
+    /// Ask the user, in the launcher, whether the game may do something.
+    /// `false` when nobody answers
+    fn confirm(&self, _prompt: ConfirmPrompt) -> BoxFuture<'_, bool> {
+        Box::pin(async { false })
+    }
+    /// A file the user dropped on the game window: copy it somewhere the
+    /// game can read, once the user agrees, and return the copy
+    fn import(&self, _from: PathBuf, _caller: String) -> BoxFuture<'_, Option<PathBuf>> {
+        Box::pin(async { None })
+    }
+}
+
+/// A yes/no question for the user, shown by the launcher
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmPrompt {
+    pub title: String,
+    pub body: String,
+    /// The label of the button that says yes; the other one always refuses
+    pub allow: String,
 }
 
 /// What the game asked its picker for
@@ -170,6 +189,18 @@ pub(crate) async fn handle(shared: &Shared, request: Request) -> Reply {
                 caller,
             });
             Reply::Picked(picked.map(|p| p.display().to_string()))
+        }
+        Request::Import { path, caller } => {
+            let copied = shared
+                .host
+                .import(PathBuf::from(&path), caller.clone())
+                .await;
+            shared.record(ActivityKind::Imported {
+                from: path,
+                to: copied.as_ref().map(|p| p.display().to_string()),
+                caller,
+            });
+            Reply::Picked(copied.map(|p| p.display().to_string()))
         }
     }
 }

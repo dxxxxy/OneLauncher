@@ -65,6 +65,12 @@ pub enum ActivityKind {
         path: Option<String>,
         caller: String,
     },
+    /// A file dropped on the game, copied in (`to`) or refused
+    Imported {
+        from: String,
+        to: Option<String>,
+        caller: String,
+    },
     /// The game asked Discord for more than rich presence (signing in,
     /// reading servers or messages); the relay refused
     DiscordDenied {
