@@ -44,6 +44,10 @@ impl SecurityUi for AppSecurityUi {
         })
     }
 
+    fn focus(&self) {
+        crate::platform::focus_window();
+    }
+
     fn confirm(&self, prompt: ConfirmPrompt) -> BoxFuture<'_, bool> {
         Box::pin(async move {
             crate::platform::focus_window();

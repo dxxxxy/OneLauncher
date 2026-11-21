@@ -51,6 +51,19 @@ pub enum Request {
     /// The user dropped a file the sandbox can't read onto the game window.
     /// The game can't prove that, so the launcher asks before copying it in
     Import { path: String, caller: String },
+    /// The user's accounts, for an in-game account switcher (names only)
+    Accounts { caller: String },
+    /// Play as another of the user's accounts from now on
+    SwitchAccount { account: String, caller: String },
+    /// Start adding an account in the launcher
+    AddAccount { caller: String },
+}
+
+/// One of the user's accounts as the game may see it: never a token
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GameAccount {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +136,10 @@ pub enum Reply {
     },
     /// The path the user picked, already reachable from inside the sandbox
     Picked(Option<String>),
+    Accounts {
+        active: String,
+        accounts: Vec<GameAccount>,
+    },
     Error(String),
 }
 
@@ -131,11 +148,15 @@ const HTTP: u8 = 2;
 const OPEN: u8 = 3;
 const PICK: u8 = 4;
 const IMPORT: u8 = 5;
+const ACCOUNTS: u8 = 6;
+const SWITCH_ACCOUNT: u8 = 7;
+const ADD_ACCOUNT: u8 = 8;
 
 const OK: u8 = 0x81;
 const HTTP_REPLY: u8 = 0x82;
 const ERROR: u8 = 0x83;
 const PICKED: u8 = 0x84;
+const ACCOUNTS_REPLY: u8 = 0x85;
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
@@ -277,6 +298,22 @@ pub fn encode_request(id: u32, request: &Request) -> Vec<u8> {
             w.string(caller);
             w.frame()
         }
+        Request::Accounts { caller } => {
+            let mut w = Writer::new(id, ACCOUNTS);
+            w.string(caller);
+            w.frame()
+        }
+        Request::SwitchAccount { account, caller } => {
+            let mut w = Writer::new(id, SWITCH_ACCOUNT);
+            w.string(account);
+            w.string(caller);
+            w.frame()
+        }
+        Request::AddAccount { caller } => {
+            let mut w = Writer::new(id, ADD_ACCOUNT);
+            w.string(caller);
+            w.frame()
+        }
     }
 }
 
@@ -315,6 +352,16 @@ pub fn decode_request(payload: &[u8]) -> io::Result<(u32, Request)> {
             path: r.string()?,
             caller: r.string()?,
         },
+        ACCOUNTS => Request::Accounts {
+            caller: r.string()?,
+        },
+        SWITCH_ACCOUNT => Request::SwitchAccount {
+            account: r.string()?,
+            caller: r.string()?,
+        },
+        ADD_ACCOUNT => Request::AddAccount {
+            caller: r.string()?,
+        },
         other => return Err(invalid(format!("unknown request kind {other}"))),
     };
     Ok((id, request))
@@ -340,6 +387,16 @@ pub fn encode_reply(id: u32, reply: &Reply) -> Vec<u8> {
             w.string(path.as_deref().unwrap_or_default());
             w.frame()
         }
+        Reply::Accounts { active, accounts } => {
+            let mut w = Writer::new(id, ACCOUNTS_REPLY);
+            w.string(active);
+            w.u16(accounts.len().min(u16::MAX as usize) as u16);
+            for account in accounts.iter().take(u16::MAX as usize) {
+                w.string(&account.id);
+                w.string(&account.name);
+            }
+            w.frame()
+        }
         Reply::Error(message) => {
             let mut w = Writer::new(id, ERROR);
             w.string(message);
@@ -362,6 +419,19 @@ pub fn decode_reply(payload: &[u8]) -> io::Result<(u32, Reply)> {
             let some = r.u8()? != 0;
             let path = r.string()?;
             Reply::Picked(some.then_some(path))
+        }
+        ACCOUNTS_REPLY => {
+            let active = r.string()?;
+            let count = r.u16()?;
+            let accounts = (0..count)
+                .map(|_| {
+                    Ok(GameAccount {
+                        id: r.string()?,
+                        name: r.string()?,
+                    })
+                })
+                .collect::<io::Result<_>>()?;
+            Reply::Accounts { active, accounts }
         }
         ERROR => Reply::Error(r.string()?),
         other => return Err(invalid(format!("unknown reply kind {other}"))),
@@ -423,6 +493,16 @@ mod tests {
             path: r"C:\Users\me\Downloads\pack.zip".into(),
             caller: "minecraft".into(),
         });
+        round_trip_request(Request::Accounts {
+            caller: "polyplus".into(),
+        });
+        round_trip_request(Request::SwitchAccount {
+            account: "00000000-0000-0000-0000-000000000002".into(),
+            caller: "polyplus".into(),
+        });
+        round_trip_request(Request::AddAccount {
+            caller: String::new(),
+        });
         round_trip_request(Request::Pick {
             mode: PickMode::SaveFile,
             title: "Save".into(),
@@ -438,6 +518,13 @@ mod tests {
             Reply::Error("nope".into()),
             Reply::Picked(None),
             Reply::Picked(Some("C:/x.png".into())),
+            Reply::Accounts {
+                active: "a".into(),
+                accounts: vec![GameAccount {
+                    id: "a".into(),
+                    name: "Steve".into(),
+                }],
+            },
             Reply::Http {
                 status: 204,
                 headers: vec![("a".into(), "b".into())],

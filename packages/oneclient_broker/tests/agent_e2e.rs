@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use oneclient_broker::{
-    Activity, ActivityKind, BoxFuture, BrokerHost, LaunchDescriptor, OpenTarget, PickRequest,
+    Activity, ActivityKind, BoxFuture, BrokerHost, GameAccount, LaunchDescriptor, OpenTarget,
+    PickRequest,
 };
 use uuid::Uuid;
 
@@ -14,6 +15,7 @@ struct Host {
     log: Mutex<Vec<Activity>>,
     opened: Mutex<Vec<OpenTarget>>,
     imported: Mutex<Vec<PathBuf>>,
+    switched: Mutex<Vec<Uuid>>,
 }
 
 impl BrokerHost for Host {
@@ -36,6 +38,26 @@ impl BrokerHost for Host {
     fn import(&self, from: PathBuf, _caller: String) -> BoxFuture<'_, Option<PathBuf>> {
         self.imported.lock().unwrap().push(from);
         Box::pin(async { Some(PathBuf::from("imported.zip")) })
+    }
+
+    fn accounts(&self) -> BoxFuture<'_, Vec<GameAccount>> {
+        Box::pin(async {
+            vec![
+                GameAccount {
+                    id: Uuid::from_u128(1).to_string(),
+                    name: "Main".into(),
+                },
+                GameAccount {
+                    id: Uuid::from_u128(2).to_string(),
+                    name: "Alt".into(),
+                },
+            ]
+        })
+    }
+
+    fn switch_account(&self, to: Uuid) -> BoxFuture<'_, Result<(), String>> {
+        self.switched.lock().unwrap().push(to);
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -97,6 +119,36 @@ public class Probe {
         Object dropped = stubLoader.loadClass("org.lwjgl.glfw.GLFWDropCallback")
             .getMethod("getName", long.class, int.class).invoke(null, 0L, 3);
         System.out.println("dropped=" + dropped);
+
+        // Poly+'s account switcher, stubbed the same way: it gets the
+        // launcher's accounts with the fake token, and switching remaps
+        String pp = "org/polyfrost/polyplus/client/launcher/";
+        java.nio.file.Path ppSource = stubs.resolve(pp + "LauncherAccountStore.java");
+        java.nio.file.Files.createDirectories(ppSource.getParent());
+        java.nio.file.Files.write(ppSource, ("package org.polyfrost.polyplus.client.launcher;"
+            + " public class LauncherAccountStore {"
+            + " public static class StoredAccount { final String id, name, token;"
+            + "  public StoredAccount(String id, String name, String token, String refresh, String expires, String kind) {"
+            + "   this.id = id; this.name = name; this.token = token; }"
+            + "  public String getId() { return id; } public String toString() { return name + ':' + token; } }"
+            + " public static class CredentialsStore { public final java.util.Map<String, StoredAccount> users; public final String active;"
+            + "  public CredentialsStore(java.util.Map<String, StoredAccount> users, String active) { this.users = users; this.active = active; }"
+            + "  public String toString() { return users.values() + \" active \" + active; } }"
+            + " public CredentialsStore load() { return null; } }").getBytes("UTF-8"));
+        java.nio.file.Path switchSource = stubs.resolve(pp + "AccountSwitch.java");
+        java.nio.file.Files.write(switchSource, ("package org.polyfrost.polyplus.client.launcher;"
+            + " public class AccountSwitch { public boolean apply(LauncherAccountStore.StoredAccount a) { return true; } }")
+            .getBytes("UTF-8"));
+        javax.tools.ToolProvider.getSystemJavaCompiler().run(null, null, null, "-d", stubs.toString(),
+            ppSource.toString(), switchSource.toString());
+        Class<?> store = stubLoader.loadClass("org.polyfrost.polyplus.client.launcher.LauncherAccountStore");
+        Object credentials = store.getMethod("load").invoke(store.getConstructor().newInstance());
+        System.out.println("accounts=" + credentials);
+        Object alt = ((java.util.Map<?, ?>) credentials.getClass().getField("users").get(credentials))
+            .get("00000000-0000-0000-0000-000000000002");
+        Class<?> switcher = stubLoader.loadClass("org.polyfrost.polyplus.client.launcher.AccountSwitch");
+        System.out.println("switched=" + switcher.getMethod("apply", alt.getClass())
+            .invoke(switcher.getConstructor().newInstance(), alt));
 
         // jagrosh-style Discord IPC: the pipe opened as a file
         if (System.getProperty("os.name").startsWith("Windows")) {
@@ -180,6 +232,9 @@ async fn the_agent_routes_account_requests_through_the_broker() {
         .arg(&descriptor.fake_token)
         .arg(&packs)
         .arg(dir.join("stubs"))
+        // as Minecraft gets it; the agent reads the fake token from here
+        .arg("--accessToken")
+        .arg(&descriptor.fake_token)
         .env(oneclient_broker::KEY_ENV, &descriptor.key)
         .current_dir(&dir);
     let output = tokio::time::timeout(std::time::Duration::from_secs(60), command.output())
@@ -199,6 +254,7 @@ async fn the_agent_routes_account_requests_through_the_broker() {
         "modern=403",
         "async=403",
         "dropped=imported.zip",
+        "switched=true",
     ];
     if cfg!(windows) {
         expected.push("discord=k");
@@ -233,6 +289,18 @@ async fn the_agent_routes_account_requests_through_the_broker() {
         ]
     );
 
+    let accounts = format!(
+        "accounts=[Main:{fake}, Alt:{fake}] active 00000000-0000-0000-0000-000000000001",
+        fake = descriptor.fake_token
+    );
+    assert!(
+        stdout.contains(&accounts),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert_eq!(
+        host.switched.lock().unwrap().as_slice(),
+        &[Uuid::from_u128(2)]
+    );
     assert_eq!(
         host.imported.lock().unwrap().as_slice(),
         &[PathBuf::from("/oneclient-e2e-missing/pack3.zip")]

@@ -30,7 +30,7 @@ use uuid::Uuid;
 
 pub use activity::{Activity, ActivityKind};
 pub use discord::DiscordRelay;
-pub use protocol::{PickFilter, PickMode};
+pub use protocol::{GameAccount, PickFilter, PickMode};
 pub use session::{BoxFuture, BrokerHost, ConfirmPrompt, OpenTarget, PickRequest, validate_open};
 use session::{SessionConfig, Shared};
 pub use transport::Endpoint;
@@ -294,6 +294,58 @@ mod tests {
                 .contains("change your Minecraft name to Taken")
         );
         assert!(asked[0].body.contains("mods/rat.jar"));
+    }
+
+    #[tokio::test]
+    async fn the_game_can_only_switch_to_the_users_own_accounts() {
+        struct Accounts(Mutex<Vec<Uuid>>);
+        impl BrokerHost for Accounts {
+            fn real_token(&self, account: Uuid) -> BoxFuture<'_, Result<String, String>> {
+                Box::pin(async move { Ok(format!("REAL-{account}")) })
+            }
+            fn record(&self, _activity: Activity) {}
+            fn open(&self, _target: OpenTarget) {}
+            fn pick(&self, _request: PickRequest) -> BoxFuture<'_, Option<PathBuf>> {
+                Box::pin(async { None })
+            }
+            fn accounts(&self) -> BoxFuture<'_, Vec<GameAccount>> {
+                Box::pin(async {
+                    vec![GameAccount {
+                        id: Uuid::from_u128(2).to_string(),
+                        name: "Alt".into(),
+                    }]
+                })
+            }
+            fn switch_account(&self, to: Uuid) -> BoxFuture<'_, Result<(), String>> {
+                self.0.lock().unwrap().push(to);
+                Box::pin(async { Ok(()) })
+            }
+        }
+        let host = Arc::new(Accounts(Mutex::new(vec![])));
+        let shared = Shared::new(
+            SessionConfig {
+                cluster_id: 1,
+                account: Uuid::from_u128(1),
+                key: "KEY".into(),
+                fake_token: "FAKE".into(),
+                open_roots: vec![],
+                http: reqwest::Client::new(),
+            },
+            host.clone(),
+        );
+        let switch = |id: u128| Request::SwitchAccount {
+            account: Uuid::from_u128(id).to_string(),
+            caller: String::new(),
+        };
+
+        assert!(matches!(
+            session::handle(&shared, switch(9)).await,
+            Reply::Error(_)
+        ));
+        assert_eq!(shared.account(), Uuid::from_u128(1));
+        assert_eq!(session::handle(&shared, switch(2)).await, Reply::Ok);
+        assert_eq!(shared.account(), Uuid::from_u128(2));
+        assert_eq!(host.0.lock().unwrap().as_slice(), &[Uuid::from_u128(2)]);
     }
 
     #[tokio::test]

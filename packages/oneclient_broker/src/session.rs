@@ -17,7 +17,7 @@ use uuid::Uuid;
 use crate::activity::{Activity, ActivityKind};
 use crate::limiter::JoinLimiter;
 use crate::policy::{self, AccountChange, ChangeKind, Decision, Route, TokenPlacement};
-use crate::protocol::{self, PickFilter, PickMode, Reply, Request};
+use crate::protocol::{self, GameAccount, PickFilter, PickMode, Reply, Request};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -41,6 +41,17 @@ pub trait BrokerHost: Send + Sync + 'static {
     fn import(&self, _from: PathBuf, _caller: String) -> BoxFuture<'_, Option<PathBuf>> {
         Box::pin(async { None })
     }
+    /// The user's accounts the game may switch to
+    fn accounts(&self) -> BoxFuture<'_, Vec<GameAccount>> {
+        Box::pin(async { Vec::new() })
+    }
+    /// The game now plays as `to`, one of [`Self::accounts`]; the broker
+    /// answers with that account's token from here on
+    fn switch_account(&self, _to: Uuid) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async { Err("switching accounts isn't available".into()) })
+    }
+    /// Show the launcher's own way to add an account
+    fn add_account(&self) {}
 }
 
 /// A yes/no question for the user, shown by the launcher
@@ -86,6 +97,8 @@ pub(crate) struct Shared {
     allowed: Mutex<HashMap<ChangeKind, Instant>>,
     /// One question at a time: a burst of requests waits for the first answer
     asking: tokio::sync::Mutex<()>,
+    /// The account the game plays as; an in-game switcher can change it
+    account: Mutex<Uuid>,
 }
 
 /// How long an approval covers more changes of the same kind
@@ -94,12 +107,20 @@ const ALLOWED_FOR: Duration = Duration::from_secs(10 * 60);
 impl Shared {
     pub fn new(config: SessionConfig, host: Arc<dyn BrokerHost>) -> Arc<Self> {
         Arc::new(Self {
-            config,
             host,
             joins: Mutex::new(JoinLimiter::standard()),
             allowed: Mutex::new(HashMap::new()),
             asking: tokio::sync::Mutex::new(()),
+            account: Mutex::new(config.account),
+            config,
         })
+    }
+
+    pub fn account(&self) -> Uuid {
+        self.account
+            .lock()
+            .map(|a| *a)
+            .unwrap_or(self.config.account)
     }
 
     /// Runs the question for a request to `path` on the profile host
@@ -257,6 +278,42 @@ pub(crate) async fn handle(shared: &Shared, request: Request) -> Reply {
             });
             Reply::Picked(picked.map(|p| p.display().to_string()))
         }
+        Request::Accounts { caller: _ } => Reply::Accounts {
+            active: shared.account().to_string(),
+            accounts: shared.host.accounts().await,
+        },
+        Request::SwitchAccount { account, caller } => {
+            let Ok(to) = Uuid::parse_str(&account) else {
+                return Reply::Error("not an account id".into());
+            };
+            if to == shared.account() {
+                return Reply::Ok;
+            }
+            let name = shared
+                .host
+                .accounts()
+                .await
+                .into_iter()
+                .find(|a| Uuid::parse_str(&a.id).ok() == Some(to))
+                .map(|a| a.name);
+            let Some(name) = name else {
+                return Reply::Error("that isn't one of your OneClient accounts".into());
+            };
+            match shared.host.switch_account(to).await {
+                Ok(()) => {
+                    if let Ok(mut current) = shared.account.lock() {
+                        *current = to;
+                    }
+                    shared.record(ActivityKind::SwitchedAccount { to: name, caller });
+                    Reply::Ok
+                }
+                Err(err) => Reply::Error(err),
+            }
+        }
+        Request::AddAccount { caller: _ } => {
+            shared.host.add_account();
+            Reply::Ok
+        }
         Request::Import { path, caller } => {
             let copied = shared
                 .host
@@ -286,7 +343,7 @@ async fn http(
 
     let placement = match policy::decide(&method, &parsed) {
         Decision::Allow(Route::Join) => {
-            if !policy::join_names_account(&body, &shared.config.account) {
+            if !policy::join_names_account(&body, &shared.account()) {
                 shared.record(ActivityKind::Alarm {
                     method,
                     url,
@@ -357,7 +414,7 @@ async fn http(
     let real = if placement == TokenPlacement::None {
         String::new()
     } else {
-        match shared.host.real_token(shared.config.account).await {
+        match shared.host.real_token(shared.account()).await {
             Ok(token) => token,
             Err(err) => {
                 tracing::warn!("broker could not get a token: {err}");

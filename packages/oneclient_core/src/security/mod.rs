@@ -27,6 +27,8 @@ pub trait SecurityUi: Send + Sync + 'static {
     fn pick(&self, request: PickRequest) -> oneclient_broker::BoxFuture<'_, Option<PathBuf>>;
     /// Ask the user a yes/no question over everything else
     fn confirm(&self, prompt: ConfirmPrompt) -> oneclient_broker::BoxFuture<'_, bool>;
+    /// Bring the launcher's window to the front
+    fn focus(&self);
 }
 
 const ACTIVITY_LIMIT: usize = 500;

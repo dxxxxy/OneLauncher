@@ -108,6 +108,34 @@ final class Transformer implements ClassFileTransformer {
                     + "Ljava/net/http/HttpResponse$PushPromiseHandler;)Ljava/util/concurrent/CompletableFuture;",
                     false, 3, "httpSendAsync", Kind.OBJECT, "java/util/concurrent/CompletableFuture"));
 
+    private static final String PP = "org/polyfrost/polyplus/client/launcher/";
+    private static final String PP_STORED = "L" + PP + "LauncherAccountStore$StoredAccount;";
+
+    /** Poly+'s account switcher, relayed to the launcher (see PolyPlus) */
+    private static final List<Target> PP_STORE = Arrays.asList(
+            new Target("load", "()L" + PP + "LauncherAccountStore$CredentialsStore;", false, 1, "ppLoad",
+                    Kind.OBJECT, PP + "LauncherAccountStore$CredentialsStore"),
+            new Target("save", "(L" + PP + "LauncherAccountStore$CredentialsStore;)V", false, 2, "ppSave",
+                    Kind.VOID_BOOL, null));
+
+    private static final List<Target> PP_SWITCH = Arrays.asList(
+            new Target("apply", "(" + PP_STORED + ")Z", false, 2, "ppSwitch", Kind.INT, null));
+
+    private static final List<Target> PP_ACCOUNTS = Arrays.asList(
+            new Target("remove", "(Ljava/util/UUID;)Z", false, 2, "ppRemove", Kind.INT, null),
+            new Target("addOffline", "(Ljava/lang/String;)L" + PP + "OneLauncherAccounts$Account;", false, 2,
+                    "ppAddOffline", Kind.OBJECT, PP + "OneLauncherAccounts$Account"),
+            new Target("beginLogin", "(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;", false, 2,
+                    "ppBeginLogin", Kind.OBJECT, "java/lang/Object"),
+            new Target("refresh", "(Ljava/util/UUID;ZLkotlin/coroutines/Continuation;)Ljava/lang/Object;", false, 0,
+                    "ppRefresh", Kind.TYPED, null));
+
+    private static final List<Target> PP_REFRESH = Arrays.asList(
+            new Target("refreshAfterSwitch$org_polyfrost_polyplus", "(" + PP_STORED + ")V", false, 2,
+                    "ppNoRefresh", Kind.VOID_BOOL, null),
+            new Target("refreshAfterRejection", "()Z", false, 0, "ppRefreshAfterRejection", Kind.INT, null),
+            new Target("startRefreshIfExpired", "()V", false, 1, "ppSkip", Kind.VOID_BOOL, null));
+
     /** Patched classes outside the JDK that may live in a named module. */
     private static final ConcurrentLinkedQueue<Object[]> toFix = new ConcurrentLinkedQueue<Object[]>();
 
@@ -130,6 +158,15 @@ final class Transformer implements ClassFileTransformer {
             List<Target> targets;
             if (name.equals("jdk/internal/net/http/HttpClientFacade")) {
                 return Patcher.patch(bytes, HTTP_CLIENT);
+            }
+            if (name.startsWith(PP) && Bridge.INSTANCE.configured()) {
+                // with the broker, whether sandboxed or not: real tokens stay out
+                if (name.equals(PP + "LauncherAccountStore")) targets = PP_STORE;
+                else if (name.equals(PP + "AccountSwitch")) targets = PP_SWITCH;
+                else if (name.equals(PP + "OneLauncherAccounts")) targets = PP_ACCOUNTS;
+                else if (name.equals(PP + "SessionRefresh")) targets = PP_REFRESH;
+                else return null;
+                return remember(loader, name, Patcher.patch(bytes, targets));
             }
             if (!Hooks.sandboxed) return null;
             if (name.equals("java/io/RandomAccessFile")) {
@@ -155,17 +192,20 @@ final class Transformer implements ClassFileTransformer {
             else if (name.equals("org/lwjgl/glfw/GLFW")) targets = GLFW;
             else return null;
 
-            byte[] patched = Patcher.patch(bytes, targets);
-            if (patched != null && loader != null) {
-                String dotted = name.replace('/', '.');
-                loaders.put(dotted, loader);
-                toFix.add(new Object[] {loader, dotted});
-            }
-            return patched;
+            return remember(loader, name, Patcher.patch(bytes, targets));
         } catch (Throwable t) {
             Main.log("left " + name + " unpatched: " + t);
             return null;
         }
+    }
+
+    private static byte[] remember(ClassLoader loader, String name, byte[] patched) {
+        if (patched != null && loader != null) {
+            String dotted = name.replace('/', '.');
+            loaders.put(dotted, loader);
+            toFix.add(new Object[] {loader, dotted});
+        }
+        return patched;
     }
 
     /**

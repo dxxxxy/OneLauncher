@@ -73,6 +73,11 @@ pub enum ActivityKind {
         path: Option<String>,
         caller: String,
     },
+    /// The game switched to another of the user's accounts
+    SwitchedAccount {
+        to: String,
+        caller: String,
+    },
     /// A file dropped on the game, copied in (`to`) or refused
     Imported {
         from: String,

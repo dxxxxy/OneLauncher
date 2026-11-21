@@ -618,6 +618,52 @@ public final class Hooks {
         }
     }
 
+    // ---- Poly+ accounts (see PolyPlus)
+
+    public static Object ppLoad(Object store) throws Exception {
+        return PolyPlus.load();
+    }
+
+    /** Nothing to save: the launcher owns the accounts */
+    public static boolean ppSave(Object store, Object credentials) {
+        return true;
+    }
+
+    public static Object ppSwitch(Object accountSwitch, Object stored) throws Exception {
+        return PolyPlus.switchTo(stored) ? PASS : Integer.valueOf(0);
+    }
+
+    /** Accounts are removed in the launcher, not from the game */
+    public static Object ppRemove(Object accounts, Object id) {
+        return Integer.valueOf(0);
+    }
+
+    public static Object ppAddOffline(Object accounts, Object name) {
+        throw new IllegalStateException("Add offline accounts in OneClient");
+    }
+
+    public static Object ppBeginLogin(Object accounts, Object continuation) {
+        throw PolyPlus.addAccount();
+    }
+
+    public static Object ppRefresh(Object accounts, Object id, boolean force, Object continuation)
+            throws Exception {
+        return PolyPlus.refreshed(accounts, id);
+    }
+
+    public static boolean ppNoRefresh(Object refresh, Object stored) {
+        return true;
+    }
+
+    /** A rejected session can't be fixed from the game: the broker's token is already fresh */
+    public static Object ppRefreshAfterRejection() {
+        return Integer.valueOf(0);
+    }
+
+    public static boolean ppSkip(Object refresh) {
+        return true;
+    }
+
     // ---- drag and drop
 
     private static final ThreadLocal<Boolean> inDrop = new ThreadLocal<Boolean>();

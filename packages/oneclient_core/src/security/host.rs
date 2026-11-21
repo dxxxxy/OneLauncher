@@ -4,7 +4,8 @@ use std::time::{Duration, Instant};
 
 use oneclient_auth::AuthService;
 use oneclient_broker::{
-    Activity, ActivityKind, BoxFuture, BrokerHost, ConfirmPrompt, OpenTarget, PickMode, PickRequest,
+    Activity, ActivityKind, BoxFuture, BrokerHost, ConfirmPrompt, GameAccount, OpenTarget,
+    PickMode, PickRequest,
 };
 use oneclient_events::EventBus;
 use uuid::Uuid;
@@ -164,6 +165,58 @@ impl BrokerHost for LauncherBrokerHost {
                 .await
                 .unwrap_or(false)
         })
+    }
+
+    fn accounts(&self) -> BoxFuture<'_, Vec<GameAccount>> {
+        Box::pin(async move {
+            self.auth
+                .list_accounts()
+                .await
+                .into_iter()
+                // the broker only has tokens for Microsoft accounts
+                .filter(|a| a.kind == oneclient_auth::AccountKind::Microsoft && !a.signed_out)
+                .map(|a| GameAccount {
+                    id: a.id.to_string(),
+                    name: a.username,
+                })
+                .collect()
+        })
+    }
+
+    fn switch_account(&self, to: Uuid) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            let account = self
+                .auth
+                .get_account(to)
+                .await
+                .filter(|a| a.kind == oneclient_auth::AccountKind::Microsoft && !a.signed_out)
+                .ok_or("that isn't one of your OneClient accounts")?;
+            // a launcher restart picks the broker back up as this account
+            if let Ok(path) = super::session_file(self.cluster_id)
+                && let Ok(mut descriptor) =
+                    polyio::read_json::<oneclient_broker::LaunchDescriptor>(&path).await
+            {
+                descriptor.account = to;
+                let _ = descriptor.save(&path).await;
+            }
+            self.events
+                .notify(format!("Switched account in {}", self.cluster_name))
+                .body(format!("The game now plays as {}.", account.username))
+                .info()
+                .send();
+            Ok(())
+        })
+    }
+
+    fn add_account(&self) {
+        if let Some(ui) = self.security.ui() {
+            ui.focus();
+        }
+        self.events
+            .notify("Add the account in OneClient")
+            .body("Open Settings, then Accounts, and sign in there. The game lists the new account right after.")
+            .info()
+            .send();
     }
 
     fn import(&self, from: PathBuf, _caller: String) -> BoxFuture<'_, Option<PathBuf>> {
