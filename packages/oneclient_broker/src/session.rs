@@ -67,6 +67,9 @@ pub trait BrokerHost: Send + Sync + 'static {
     /// Watch the user's real Downloads folder for this one file and copy it
     /// where the game waits for it; `None` stops watching
     fn watch_downloads(&self, _wanted: Option<WantedDownload>) {}
+    /// One of the game's Discord connections started (`true`) or stopped
+    /// showing an activity, so the launcher can step its own presence aside
+    fn game_presence(&self, _shown: bool) {}
 }
 
 /// A file a mod sent the user to download in their browser. Only a file

@@ -88,9 +88,25 @@ async fn write_frame<W: AsyncWrite + Unpin>(
     writer.flush().await
 }
 
+/// Whether a `SET_ACTIVITY` shows an activity (`Some(true)`) or clears it
+fn sets_activity(frame: &Value) -> Option<bool> {
+    if frame.get("cmd").and_then(Value::as_str) != Some("SET_ACTIVITY") {
+        return None;
+    }
+    let activity = frame.get("args").and_then(|args| args.get("activity"));
+    Some(activity.is_some_and(Value::is_object))
+}
+
 /// Relays one game connection to Discord until either side hangs up.
-/// `denied` hears each refused command once per connection
-pub async fn relay<G, D>(game: G, discord: D, mut denied: impl FnMut(String)) -> io::Result<()>
+/// `denied` hears each refused command once per connection; `presence`
+/// hears when the game starts and stops showing an activity, including
+/// when it hangs up while showing one
+pub async fn relay<G, D>(
+    game: G,
+    discord: D,
+    mut denied: impl FnMut(String),
+    mut presence: impl FnMut(bool),
+) -> io::Result<()>
 where
     G: AsyncRead + AsyncWrite + Unpin,
     D: AsyncRead + AsyncWrite + Unpin,
@@ -99,56 +115,69 @@ where
     let (mut discord_read, mut discord_write) = tokio::io::split(discord);
     let game_write = tokio::sync::Mutex::new(game_write);
     let mut reported = HashSet::new();
+    let mut shown = false;
 
-    let up = async {
-        while let Some((op, body)) = read_frame(&mut game_read).await? {
-            match op {
-                HANDSHAKE | PING | PONG => write_frame(&mut discord_write, op, &body).await?,
-                CLOSE => {
-                    write_frame(&mut discord_write, op, &body).await?;
-                    break;
-                }
-                FRAME => {
-                    let frame: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-                    if allowed(&frame) {
+    let result = {
+        let up = async {
+            while let Some((op, body)) = read_frame(&mut game_read).await? {
+                match op {
+                    HANDSHAKE | PING | PONG => write_frame(&mut discord_write, op, &body).await?,
+                    CLOSE => {
                         write_frame(&mut discord_write, op, &body).await?;
-                        continue;
+                        break;
                     }
-                    let command = frame
-                        .get("cmd")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown")
-                        .to_string();
-                    if reported.insert(command.clone()) {
-                        denied(command.clone());
+                    FRAME => {
+                        let frame: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                        if allowed(&frame) {
+                            write_frame(&mut discord_write, op, &body).await?;
+                            if let Some(now) = sets_activity(&frame)
+                                && now != shown
+                            {
+                                shown = now;
+                                presence(now);
+                            }
+                            continue;
+                        }
+                        let command = frame
+                            .get("cmd")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown")
+                            .to_string();
+                        if reported.insert(command.clone()) {
+                            denied(command.clone());
+                        }
+                        let reply = json!({
+                            "cmd": command,
+                            "evt": "ERROR",
+                            "nonce": frame.get("nonce").cloned().unwrap_or(Value::Null),
+                            "data": {
+                                "code": 4006,
+                                "message": "OneClient only lets games set rich presence",
+                            },
+                        });
+                        let reply = serde_json::to_vec(&reply).map_err(io::Error::other)?;
+                        write_frame(&mut *game_write.lock().await, FRAME, &reply).await?;
                     }
-                    let reply = json!({
-                        "cmd": command,
-                        "evt": "ERROR",
-                        "nonce": frame.get("nonce").cloned().unwrap_or(Value::Null),
-                        "data": {
-                            "code": 4006,
-                            "message": "OneClient only lets games set rich presence",
-                        },
-                    });
-                    let reply = serde_json::to_vec(&reply).map_err(io::Error::other)?;
-                    write_frame(&mut *game_write.lock().await, FRAME, &reply).await?;
+                    _ => break,
                 }
-                _ => break,
             }
+            io::Result::Ok(())
+        };
+        let down = async {
+            while let Some((op, body)) = read_frame(&mut discord_read).await? {
+                write_frame(&mut *game_write.lock().await, op, &body).await?;
+            }
+            io::Result::Ok(())
+        };
+        tokio::select! {
+            result = up => result,
+            result = down => result,
         }
-        io::Result::Ok(())
     };
-    let down = async {
-        while let Some((op, body)) = read_frame(&mut discord_read).await? {
-            write_frame(&mut *game_write.lock().await, op, &body).await?;
-        }
-        io::Result::Ok(())
-    };
-    tokio::select! {
-        result = up => result,
-        result = down => result,
+    if shown {
+        presence(false);
     }
+    result
 }
 
 /// A relay serving one game; dropping it stops it
@@ -197,13 +226,18 @@ fn handle(cluster_id: i64, host: Arc<dyn BrokerHost>, connect: Connect, mut game
             tracing::debug!("Discord closed the relay: {err}");
             return;
         }
-        let result = relay(game, discord, |command| {
-            tracing::info!(cluster_id, %command, "refused a Discord command from the game");
-            host.record(Activity::now(
-                cluster_id,
-                ActivityKind::DiscordDenied { command },
-            ));
-        })
+        let result = relay(
+            game,
+            discord,
+            |command| {
+                tracing::info!(cluster_id, %command, "refused a Discord command from the game");
+                host.record(Activity::now(
+                    cluster_id,
+                    ActivityKind::DiscordDenied { command },
+                ));
+            },
+            |shown| host.game_presence(shown),
+        )
         .await;
         if let Err(err) = result {
             tracing::debug!("Discord relay connection ended: {err}");
@@ -503,9 +537,16 @@ mod tests {
         let (mut game, game_side) = tokio::io::duplex(1 << 16);
         let (relay_side, mut discord) = tokio::io::duplex(1 << 16);
         let denied = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let log = Arc::clone(&denied);
+        let shown = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (log, seen) = (Arc::clone(&denied), Arc::clone(&shown));
         let task = tokio::spawn(async move {
-            relay(game_side, relay_side, move |c| log.lock().unwrap().push(c)).await
+            relay(
+                game_side,
+                relay_side,
+                move |c| log.lock().unwrap().push(c),
+                move |s| seen.lock().unwrap().push(s),
+            )
+            .await
         });
 
         send(&mut game, HANDSHAKE, json!({"v": 1, "client_id": "1"})).await;
@@ -523,7 +564,15 @@ mod tests {
 
         let presence = json!({"cmd": "SET_ACTIVITY", "args": {"pid": 1, "activity": {"state": "Hypixel"}}, "nonce": "a"});
         send(&mut game, FRAME, presence.clone()).await;
-        assert_eq!(next(&mut discord).await, (FRAME, presence));
+        assert_eq!(next(&mut discord).await, (FRAME, presence.clone()));
+        // updating it says nothing new; clearing it and showing it again does
+        send(&mut game, FRAME, presence.clone()).await;
+        next(&mut discord).await;
+        let clear = json!({"cmd": "SET_ACTIVITY", "args": {"pid": 1}, "nonce": "z"});
+        send(&mut game, FRAME, clear).await;
+        next(&mut discord).await;
+        send(&mut game, FRAME, presence).await;
+        next(&mut discord).await;
 
         let join = json!({"cmd": "SUBSCRIBE", "evt": "ACTIVITY_JOIN", "nonce": "b"});
         send(&mut game, FRAME, join.clone()).await;
@@ -553,6 +602,8 @@ mod tests {
 
         drop(game);
         task.await.unwrap().unwrap();
+        // hanging up takes the game's presence with it
+        assert_eq!(*shown.lock().unwrap(), [true, false, true, false]);
     }
 
     #[tokio::test]
@@ -562,7 +613,7 @@ mod tests {
         let mut header = FRAME.to_le_bytes().to_vec();
         header.extend_from_slice(&((MAX_FRAME + 1) as u32).to_le_bytes());
         game.write_all(&header).await.unwrap();
-        let result = relay(game_side, relay_side, |_| {}).await;
+        let result = relay(game_side, relay_side, |_| {}, |_| {}).await;
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
     }
 

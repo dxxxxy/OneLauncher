@@ -47,6 +47,8 @@ pub struct SecurityService {
     discord_relays: parking_lot::Mutex<HashMap<i64, oneclient_broker::DiscordRelay>>,
     protection: parking_lot::Mutex<HashMap<i64, oneclient_sandbox::Protection>>,
     denied_seen: parking_lot::Mutex<std::collections::HashSet<(i64, String)>>,
+    /// Discord connections showing a game's own rich presence, per game
+    game_presences: parking_lot::Mutex<HashMap<i64, usize>>,
 }
 
 static GLOBAL: std::sync::OnceLock<Arc<SecurityService>> = std::sync::OnceLock::new();
@@ -186,6 +188,20 @@ impl SecurityService {
         relay: oneclient_broker::DiscordRelay,
     ) {
         self.discord_relays.lock().insert(cluster_id, relay);
+    }
+
+    /// Counts a game's Discord connections showing an activity; whether any
+    /// game shows one now
+    pub(crate) fn game_presence(&self, cluster_id: i64, shown: bool) -> bool {
+        let mut presences = self.game_presences.lock();
+        let count = presences.entry(cluster_id).or_default();
+        if shown {
+            *count += 1;
+        } else {
+            *count = count.saturating_sub(1);
+        }
+        presences.retain(|_, count| *count > 0);
+        !presences.is_empty()
     }
 
     /// When the game exits: its broker and Discord relay go with it
@@ -391,7 +407,18 @@ pub(crate) async fn has_voice_mod(mods_dir: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{SavedSession, denied_path};
+    use super::{SavedSession, SecurityService, denied_path};
+
+    #[test]
+    fn the_launcher_presence_steps_aside_while_any_game_shows_one() {
+        let security = SecurityService::default();
+        assert!(security.game_presence(1, true));
+        assert!(security.game_presence(2, true));
+        assert!(security.game_presence(1, false));
+        // a stray "stopped" never goes below none
+        assert!(security.game_presence(1, false));
+        assert!(!security.game_presence(2, false));
+    }
 
     #[test]
     fn sessions_from_older_launchers_still_resume() {

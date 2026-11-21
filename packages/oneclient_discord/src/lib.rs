@@ -44,6 +44,7 @@ impl Presence {
 enum Command {
     SetPresence(Presence),
     SetEnabled(bool),
+    SetHidden(bool),
     Shutdown,
 }
 
@@ -72,6 +73,12 @@ impl DiscordRpc {
         self.send(Command::SetEnabled(enabled));
     }
 
+    /// While a game shows its own rich presence the launcher's would only
+    /// duplicate it, so it stays cleared until `false`
+    pub fn set_hidden(&self, hidden: bool) {
+        self.send(Command::SetHidden(hidden));
+    }
+
     pub fn shutdown(&self) {
         self.send(Command::Shutdown);
     }
@@ -86,6 +93,7 @@ impl DiscordRpc {
 struct Worker {
     client: DiscordIpcClient,
     enabled: bool,
+    hidden: bool,
     connected: bool,
     ever_connected: bool,
     presence: Presence,
@@ -98,6 +106,7 @@ impl Worker {
         Self {
             client: DiscordIpcClient::new(DISCORD_CLIENT_ID),
             enabled,
+            hidden: false,
             connected: false,
             ever_connected: false,
             presence: Presence::Idle,
@@ -113,6 +122,7 @@ impl Worker {
             match rx.recv_timeout(self.poll_interval()) {
                 Ok(Command::SetPresence(presence)) => self.set_presence(presence),
                 Ok(Command::SetEnabled(enabled)) => self.set_enabled(enabled),
+                Ok(Command::SetHidden(hidden)) => self.set_hidden(hidden),
                 Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
                 Err(RecvTimeoutError::Timeout) => self.publish(),
             }
@@ -156,8 +166,22 @@ impl Worker {
         }
     }
 
+    fn set_hidden(&mut self, hidden: bool) {
+        if self.hidden == hidden {
+            return;
+        }
+        self.hidden = hidden;
+        if hidden {
+            if self.connected && self.client.clear_activity().is_err() {
+                self.drop_connection();
+            }
+        } else {
+            self.publish();
+        }
+    }
+
     fn publish(&mut self) {
-        if !self.enabled || !self.ensure_connected() {
+        if !self.enabled || self.hidden || !self.ensure_connected() {
             return;
         }
 

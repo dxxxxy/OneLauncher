@@ -27,6 +27,7 @@ pub struct LauncherBrokerHost {
     recent_import: parking_lot::Mutex<Option<(PathBuf, Instant)>>,
     /// Watching the user's Downloads folder for a file a mod waits for
     downloads_watch: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    discord: oneclient_discord::DiscordRpc,
 }
 
 impl Drop for LauncherBrokerHost {
@@ -61,6 +62,7 @@ impl LauncherBrokerHost {
             security: Arc::clone(&state.security),
             recent_import: parking_lot::Mutex::new(None),
             downloads_watch: parking_lot::Mutex::new(None),
+            discord: state.discord.clone(),
         }
     }
 }
@@ -331,6 +333,11 @@ impl BrokerHost for LauncherBrokerHost {
                 },
             ));
         }));
+    }
+
+    fn game_presence(&self, shown: bool) {
+        let any = self.security.game_presence(self.cluster_id, shown);
+        self.discord.set_hidden(any);
     }
 
     fn reveal(&self, file: PathBuf) {
