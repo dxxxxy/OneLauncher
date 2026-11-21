@@ -537,3 +537,205 @@ async fn poly_plus_ktor_requests_go_through_the_broker() {
     drop(broker);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// java-discord-rpc as mods ship it, over stand-ins for JNA (the agent
+/// answers `Native.loadLibrary("discord-rpc", ...)` itself)
+#[cfg(windows)]
+const RPC_PROBE: &str = r#"
+import java.net.*;
+import java.nio.file.*;
+public class RpcProbe {
+    static void write(Path root, String path, String source) throws Exception {
+        Path file = root.resolve(path);
+        Files.createDirectories(file.getParent());
+        Files.write(file, source.getBytes("UTF-8"));
+    }
+
+    public static void main(String[] args) throws Exception {
+        Path stubs = Paths.get(args[0]);
+        write(stubs, "com/sun/jna/Library.java", "package com.sun.jna; public interface Library {}");
+        write(stubs, "com/sun/jna/Callback.java", "package com.sun.jna; public interface Callback {}");
+        write(stubs, "com/sun/jna/Structure.java", "package com.sun.jna; public abstract class Structure {}");
+        write(stubs, "com/sun/jna/Native.java", "package com.sun.jna; public class Native {"
+            + " public static Object loadLibrary(String name, Class<?> type) { throw new UnsatisfiedLinkError(name); } }");
+        String rpc = "club/minnced/discord/rpc/";
+        String pkg = "package club.minnced.discord.rpc; ";
+        write(stubs, rpc + "DiscordUser.java", pkg + "public class DiscordUser extends com.sun.jna.Structure {"
+            + " public String userId, username, discriminator, avatar; }");
+        write(stubs, rpc + "DiscordRichPresence.java", pkg + "public class DiscordRichPresence extends com.sun.jna.Structure {"
+            + " public String state, details; public long startTimestamp, endTimestamp;"
+            + " public String largeImageKey, largeImageText, smallImageKey, smallImageText, partyId;"
+            + " public int partySize, partyMax; public String matchSecret, joinSecret, spectateSecret; public byte instance; }");
+        write(stubs, rpc + "DiscordEventHandlers.java", pkg + "public class DiscordEventHandlers extends com.sun.jna.Structure {"
+            + " public interface OnReady extends com.sun.jna.Callback { void accept(DiscordUser user); }"
+            + " public interface OnStatus extends com.sun.jna.Callback { void accept(int code, String message); }"
+            + " public interface OnGameUpdate extends com.sun.jna.Callback { void accept(String secret); }"
+            + " public interface OnJoinRequest extends com.sun.jna.Callback { void accept(DiscordUser user); }"
+            + " public OnReady ready; public OnStatus disconnected, errored; public OnGameUpdate joinGame, spectateGame;"
+            + " public OnJoinRequest joinRequest; }");
+        write(stubs, rpc + "DiscordRPC.java", pkg + "public interface DiscordRPC extends com.sun.jna.Library {"
+            + " DiscordRPC INSTANCE = (DiscordRPC) com.sun.jna.Native.loadLibrary(\"discord-rpc\", DiscordRPC.class);"
+            + " void Discord_Initialize(String id, DiscordEventHandlers handlers, boolean register, String steam);"
+            + " void Discord_Shutdown(); void Discord_RunCallbacks(); void Discord_UpdatePresence(DiscordRichPresence p);"
+            + " void Discord_ClearPresence(); void Discord_Respond(String user, int reply); }");
+        write(stubs, rpc + "Driver.java", pkg + "public class Driver { public static String run() throws Exception {"
+            + " final StringBuilder log = new StringBuilder();"
+            + " DiscordEventHandlers handlers = new DiscordEventHandlers();"
+            + " handlers.ready = u -> log.append(\"ready=\").append(u.username).append(' ');"
+            + " handlers.joinGame = s -> log.append(\"join=\").append(s).append(' ');"
+            + " DiscordRPC lib = DiscordRPC.INSTANCE;"
+            + " lib.Discord_Initialize(\"123\", handlers, true, null);"
+            + " DiscordRichPresence p = new DiscordRichPresence();"
+            + " p.state = \"Hypixel\"; p.details = \"Bed \\\"Wars\\\"\"; p.startTimestamp = 1700000000L;"
+            + " p.largeImageKey = \"logo\"; p.partySize = 2; p.partyMax = 4;"
+            + " lib.Discord_UpdatePresence(p);"
+            + " long until = System.currentTimeMillis() + 20000;"
+            + " while (log.indexOf(\"join=\") < 0 && System.currentTimeMillis() < until) {"
+            + "  lib.Discord_RunCallbacks(); Thread.sleep(20); }"
+            + " lib.Discord_ClearPresence(); Thread.sleep(500); lib.Discord_Shutdown();"
+            + " return log.toString().trim(); } }");
+
+        java.util.List<String> sources = new java.util.ArrayList<>();
+        try (java.util.stream.Stream<Path> files = Files.walk(stubs)) {
+            files.filter(f -> f.toString().endsWith(".java")).forEach(f -> sources.add(f.toString()));
+        }
+        sources.add(0, stubs.toString());
+        sources.add(0, "-d");
+        javax.tools.ToolProvider.getSystemJavaCompiler().run(null, null, null, sources.toArray(new String[0]));
+        URLClassLoader loader = new URLClassLoader(new URL[] {stubs.toUri().toURL()});
+        Object result = loader.loadClass("club.minnced.discord.rpc.Driver").getMethod("run").invoke(null);
+        System.out.println("rpc=" + result);
+        System.exit(0);
+    }
+}
+"#;
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn java_discord_rpc_reaches_discord_through_the_relay() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn read(pipe: &mut (impl AsyncReadExt + Unpin)) -> (u32, serde_json::Value) {
+        let mut header = [0u8; 8];
+        pipe.read_exact(&mut header).await.unwrap();
+        let op = u32::from_le_bytes(header[..4].try_into().unwrap());
+        let len = u32::from_le_bytes(header[4..].try_into().unwrap()) as usize;
+        let mut body = vec![0; len];
+        pipe.read_exact(&mut body).await.unwrap();
+        (op, serde_json::from_slice(&body).unwrap())
+    }
+    async fn write(pipe: &mut (impl AsyncWriteExt + Unpin), body: serde_json::Value) {
+        let body = serde_json::to_vec(&body).unwrap();
+        let mut frame = 1u32.to_le_bytes().to_vec();
+        frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&body);
+        pipe.write_all(&frame).await.unwrap();
+    }
+
+    let Some(java) = java() else {
+        eprintln!("skipping: no java");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("oneclient-broker-rpc-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("RpcProbe.java"), RPC_PROBE).unwrap();
+    let jar = oneclient_broker::agent::install(&dir.join("agent"))
+        .await
+        .unwrap();
+
+    // stands in for the launcher's relay, with Discord behind it
+    let pipe = format!(r"\\.\pipe\oneclient-test-rpc-{}", Uuid::new_v4().simple());
+    let mut server = tokio::net::windows::named_pipe::ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&pipe)
+        .unwrap();
+    let discord = tokio::spawn(async move {
+        server.connect().await.unwrap();
+        let (op, hello) = read(&mut server).await;
+        assert_eq!((op, &hello["client_id"]), (0, &serde_json::json!("123")));
+        write(
+            &mut server,
+            serde_json::json!({"cmd": "DISPATCH", "evt": "READY",
+                "data": {"user": {"id": "1", "username": "steve", "discriminator": "0", "avatar": null}}}),
+        )
+        .await;
+        let mut frames = Vec::new();
+        loop {
+            let (_, frame) = read(&mut server).await;
+            let shows = frame["cmd"] == "SET_ACTIVITY" && frame["args"]["activity"].is_object();
+            frames.push(frame);
+            if shows {
+                break;
+            }
+        }
+        write(
+            &mut server,
+            serde_json::json!({"cmd": "DISPATCH", "evt": "ACTIVITY_JOIN", "data": {"secret": "s3cret"}}),
+        )
+        .await;
+        loop {
+            let (_, frame) = read(&mut server).await;
+            let cleared = frame["cmd"] == "SET_ACTIVITY" && frame["args"].get("activity").is_none();
+            frames.push(frame);
+            if cleared {
+                return frames;
+            }
+        }
+    });
+
+    let output = tokio::process::Command::new(&java)
+        .arg(format!("-javaagent:{}", jar.display()))
+        .arg("-Doneclient.sandboxed=true")
+        .arg(format!("-Doneclient.discord={pipe}"))
+        .arg(dir.join("RpcProbe.java"))
+        .arg(dir.join("stubs"))
+        .current_dir(&dir)
+        .output();
+    let output = tokio::time::timeout(std::time::Duration::from_secs(60), output)
+        .await
+        .expect("probe timed out")
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("rpc=ready=steve join=s3cret"),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let frames = tokio::time::timeout(std::time::Duration::from_secs(10), discord)
+        .await
+        .unwrap()
+        .unwrap();
+    let subscribed: Vec<_> = frames
+        .iter()
+        .filter(|f| f["cmd"] == "SUBSCRIBE")
+        .map(|f| f["evt"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        subscribed,
+        [
+            "ACTIVITY_JOIN",
+            "ACTIVITY_SPECTATE",
+            "ACTIVITY_JOIN_REQUEST"
+        ]
+    );
+    let presence = frames
+        .iter()
+        .find(|f| f["args"]["activity"].is_object())
+        .unwrap();
+    assert_eq!(
+        presence["args"]["activity"],
+        serde_json::json!({
+            "state": "Hypixel",
+            "details": "Bed \"Wars\"",
+            "timestamps": {"start": 1700000000},
+            "assets": {"large_image": "logo"},
+            "party": {"size": [2, 4]},
+            // as the native library sends it
+            "instance": false,
+        })
+    );
+    assert!(presence["args"]["pid"].as_u64().unwrap() > 0);
+
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -47,6 +47,19 @@ public final class Hooks {
         return new File(relay);
     }
 
+    /**
+     * {@code Native.loadLibrary("discord-rpc", DiscordRPC.class)}: Discord's
+     * native library would open Discord's own pipe, so the game gets the same
+     * interface over the relay instead (see DiscordRpcShim).
+     */
+    public static Object jnaLoad(Object name, Object type) {
+        String relay = discordRelay;
+        if (relay == null || !"discord-rpc".equals(name) || !(type instanceof Class)) return PASS;
+        Class<?> library = (Class<?>) type;
+        if (!library.isInterface() || !library.getSimpleName().equals("DiscordRPC")) return PASS;
+        return DiscordRpcShim.create(library, relay);
+    }
+
     /** The same for constructors that take the name as a string. */
     public static Object discordPipeName(Object name) {
         String relay = discordRelay;

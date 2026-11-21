@@ -79,6 +79,13 @@ final class Transformer implements ClassFileTransformer {
             new Target("<init>", "(Ljava/lang/String;Ljava/lang/String;)V", false, 1, "discordPipeName",
                     Kind.REWRITE, "java/lang/String"));
 
+    /** java-discord-rpc's native library, answered by DiscordRpcShim */
+    private static final List<Target> JNA_NATIVE = Arrays.asList(
+            new Target("loadLibrary", "(Ljava/lang/String;Ljava/lang/Class;)Ljava/lang/Object;", false, 2, "jnaLoad",
+                    Kind.OBJECT, "java/lang/Object"),
+            new Target("load", "(Ljava/lang/String;Ljava/lang/Class;)Lcom/sun/jna/Library;", false, 2, "jnaLoad",
+                    Kind.OBJECT, "com/sun/jna/Library"));
+
     private static final List<Target> FILE = Arrays.asList(
             new Target("<init>", "(Ljava/lang/String;)V", false, 1, "discordPipeName", Kind.REWRITE,
                     "java/lang/String"));
@@ -205,6 +212,9 @@ final class Transformer implements ClassFileTransformer {
             }
             if (name.equals("java/io/File")) {
                 return Hooks.discordRelay == null ? null : Patcher.patch(bytes, FILE);
+            }
+            if (name.equals("com/sun/jna/Native")) {
+                return Hooks.discordRelay == null ? null : remember(loader, name, Patcher.patch(bytes, JNA_NATIVE));
             }
             if (name.equals("org/lwjgl/opengl/WindowsDisplay")) return Patcher.patch(bytes, LWJGL2_DISPLAY);
             if (name.equals("sun/nio/fs/WindowsPath")) return Patcher.patch(bytes, WINDOWS_PATH);
