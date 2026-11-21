@@ -472,6 +472,22 @@ public class KtorProbe {
             .invoke(null, cio, configure);
         Class<?> contentType = Class.forName(K + "http.ContentType");
 
+        // a host the broker doesn't serve goes out as usual: CIO suspends on
+        // the network and Kotlin resumes execute() with the request nulled
+        com.sun.net.httpserver.HttpServer server =
+            com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            try { Thread.sleep(200); } catch (InterruptedException e) { throw new java.io.IOException(e); }
+            byte[] hi = "hi".getBytes();
+            exchange.sendResponseHeaders(200, hi.length);
+            exchange.getResponseBody().write(hi);
+            exchange.close();
+        });
+        server.start();
+        System.out.println("plain=" + request(client, "Get",
+            "http://127.0.0.1:" + server.getAddress().getPort() + "/", null));
+        server.stop(0);
+
         Object json = Class.forName(K + "http.ContentType$Application").getField("INSTANCE").get(null);
         Object cape = Class.forName(K + "http.content.TextContent")
             .getConstructor(String.class, contentType, Class.forName(K + "http.HttpStatusCode"))
@@ -543,7 +559,7 @@ async fn poly_plus_ktor_requests_go_through_the_broker() {
     // this host refuses every account change, so both come back 403 from the
     // broker without touching the network; the multipart body still had to
     // be read in full to get there
-    for line in ["cape=403 ", "skin=403 ", "OneClient blocked"] {
+    for line in ["plain=200 hi", "cape=403 ", "skin=403 ", "OneClient blocked"] {
         assert!(stdout.contains(line), "stdout: {stdout}\nstderr: {stderr}");
     }
     let asked = host.asked.lock().unwrap().clone();

@@ -48,6 +48,9 @@ final class Ktor {
     }
 
     static Object execute(Object engine, Object data, Object continuation) throws Throwable {
+        // a suspended execute() resumes by being called again with its
+        // arguments nulled: that is CIO's own request carrying on
+        if (data == null) return Hooks.PASS;
         Object url = call(data, "getUrl");
         if (!Exchange.brokered((String) call(url, "getHost"))) return Hooks.PASS;
         String k = prefix(engine);
