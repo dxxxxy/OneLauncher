@@ -80,6 +80,29 @@ public final class Hooks {
         return true;
     }
 
+    // ---- LWJGL 2 fullscreen (Windows)
+
+    /**
+     * Windows never lets an AppContainer change the display mode, so LWJGL 2's
+     * exclusive fullscreen fails ("Failed to set display mode") and 1.8.9
+     * crashes. Skipping the switch leaves LWJGL's fullscreen window, a
+     * borderless one the size of the mode, which covers the screen for the
+     * desktop mode Minecraft asks for. {@code mode_set} stays false, so
+     * leaving fullscreen doesn't try to reset a mode that never changed.
+     */
+    public static boolean lwjglSwitchMode(Object display, Object mode) {
+        if (!sandboxed) return false;
+        try {
+            java.lang.reflect.Field current = display.getClass().getDeclaredField("current_mode");
+            current.setAccessible(true);
+            current.set(display, mode);
+            return true;
+        } catch (Throwable t) {
+            Main.log("left LWJGL's display mode switch alone: " + t);
+            return false;
+        }
+    }
+
     // ---- java.net.http (Java 11+)
 
     private static volatile HttpRelay modern;
