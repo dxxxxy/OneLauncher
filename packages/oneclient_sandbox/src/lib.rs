@@ -12,6 +12,8 @@
 //! honest about it.
 
 mod env;
+#[cfg(any(target_os = "linux", test))]
+mod flatpak;
 mod sensitive;
 mod spawn;
 

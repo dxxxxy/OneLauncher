@@ -29,19 +29,60 @@ pub(crate) enum Plan {
         write: Vec<PathBuf>,
         gaps: Vec<String>,
     },
+    /// Inside OneClient's Flatpak: a portal sub-sandbox (see crate::flatpak)
+    FlatpakSpawn {
+        program: PathBuf,
+        policy: Box<SandboxPolicy>,
+        gaps: Vec<String>,
+    },
     Off(String),
 }
 
-const FLATPAK_OFF: &str = "Flatpak already confines OneClient; games share its permissions";
+const FLATPAK_OFF: &str = "Flatpak's portal couldn't start a sandbox for the game, so it shares OneClient's own permissions";
 const AUDIO_GAP: &str =
     "Game audio goes through your sound server, which can't keep the microphone out on Linux";
 const X11_GAP: &str = "X11 lets any window read the keyboard and screen of others; use a Wayland session for full protection";
 const NO_BWRAP_GAP: &str = "bubblewrap isn't available, so the game can still reach the keyring and other apps through D-Bus; install bubblewrap for full protection";
 
+/// `flatpak-spawn`, when this is OneClient's Flatpak and the portal will
+/// start a sub-sandbox
+fn flatpak_spawn() -> Option<&'static PathBuf> {
+    static FOUND: OnceLock<Option<PathBuf>> = OnceLock::new();
+    FOUND
+        .get_or_init(|| {
+            std::env::var_os("FLATPAK_ID")?;
+            let program = PathBuf::from("/usr/bin/flatpak-spawn");
+            let works = program.is_file()
+                && std::process::Command::new(&program)
+                    .args(["--sandbox", "--no-network", "/bin/true"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .is_ok_and(|s| s.success());
+            works.then_some(program)
+        })
+        .as_ref()
+}
+
+fn x11() -> bool {
+    std::env::var_os("DISPLAY").is_some() && std::env::var_os("WAYLAND_DISPLAY").is_none()
+}
+
+fn flatpak_gaps() -> Vec<String> {
+    let mut gaps = vec![crate::flatpak::GAP.to_string()];
+    if x11() {
+        gaps.push(X11_GAP.into());
+    }
+    gaps
+}
+
 /// What [`Plan::build`] would report, without building anything
 pub(crate) fn expected(microphone: bool) -> Protection {
     if std::env::var_os("FLATPAK_ID").is_some() {
-        return Protection::Off(FLATPAK_OFF.into());
+        return match flatpak_spawn() {
+            Some(_) => Protection::Partial(flatpak_gaps()),
+            None => Protection::Off(FLATPAK_OFF.into()),
+        };
     }
     if bwrap().is_none() {
         return Protection::Partial(vec![NO_BWRAP_GAP.into()]);
@@ -54,7 +95,7 @@ pub(crate) fn expected(microphone: bool) -> Protection {
             gaps.push(AUDIO_GAP.into());
         }
     }
-    if std::env::var_os("DISPLAY").is_some() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+    if x11() {
         gaps.push(X11_GAP.into());
     }
     if gaps.is_empty() {
@@ -108,7 +149,22 @@ fn bind(args: &mut Vec<OsString>, kind: &str, path: &Path) {
 impl Plan {
     pub(crate) async fn build(policy: &SandboxPolicy) -> SandboxResult<Self> {
         if std::env::var_os("FLATPAK_ID").is_some() {
-            return Ok(Self::Off(FLATPAK_OFF.into()));
+            let Some(program) = flatpak_spawn() else {
+                return Ok(Self::Off(FLATPAK_OFF.into()));
+            };
+            for dir in policy
+                .read_write
+                .iter()
+                .chain(&policy.extra_read_write)
+                .chain([&policy.home, &policy.temp])
+            {
+                std::fs::create_dir_all(dir)?;
+            }
+            return Ok(Self::FlatpakSpawn {
+                program: program.clone(),
+                policy: Box::new(policy.clone()),
+                gaps: flatpak_gaps(),
+            });
         }
 
         let mut read: Vec<PathBuf> = policy
@@ -129,8 +185,7 @@ impl Plan {
         }
 
         let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
-        let x11 =
-            std::env::var_os("DISPLAY").is_some() && std::env::var_os("WAYLAND_DISPLAY").is_none();
+        let x11 = x11();
 
         if let Some(program) = bwrap() {
             let mut args: Vec<OsString> = Vec::new();
@@ -279,9 +334,9 @@ impl Plan {
     pub(crate) fn protection(&self) -> Protection {
         match self {
             Self::Bwrap { gaps, .. } if gaps.is_empty() => Protection::Full,
-            Self::Bwrap { gaps, .. } | Self::Landlock { gaps, .. } => {
-                Protection::Partial(gaps.clone())
-            }
+            Self::Bwrap { gaps, .. }
+            | Self::Landlock { gaps, .. }
+            | Self::FlatpakSpawn { gaps, .. } => Protection::Partial(gaps.clone()),
             Self::Off(reason) => Protection::Off(reason.clone()),
         }
     }
@@ -289,6 +344,14 @@ impl Plan {
     pub(crate) fn spawn(&self, spec: SpawnSpec) -> std::io::Result<GameChild> {
         match self {
             Self::Off(_) => crate::spawn::plain(spec),
+            Self::FlatpakSpawn {
+                program, policy, ..
+            } => {
+                let prefix = crate::flatpak::spawn_args(policy, &spec.cwd, &spec.env);
+                spec.into_tokio(Some((program.clone(), prefix)))
+                    .spawn()
+                    .map(GameChild::Tokio)
+            }
             Self::Bwrap { program, args, .. } => {
                 let mut prefix = args.clone();
                 // `--chdir` goes before `--`
