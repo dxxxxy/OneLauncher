@@ -214,7 +214,15 @@ async fn the_agent_routes_account_requests_through_the_broker() {
             .any(|a| matches!(a.kind, ActivityKind::Connected { .. })),
         "{log:?}"
     );
-    assert_eq!(log.iter().filter(|a| a.is_alarm()).count(), 3, "{log:?}");
+    // account changes ask the user; this host says no to all three
+    assert_eq!(log.iter().filter(|a| a.is_alarm()).count(), 0, "{log:?}");
+    assert_eq!(
+        log.iter()
+            .filter(|a| matches!(&a.kind, ActivityKind::Denied { reason, .. } if reason.starts_with("you didn't let")))
+            .count(),
+        3,
+        "{log:?}"
+    );
     #[cfg(windows)]
     assert_eq!(&discord.await.unwrap(), b"hello");
     assert_eq!(

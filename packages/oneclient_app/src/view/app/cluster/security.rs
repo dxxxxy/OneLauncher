@@ -68,6 +68,10 @@ fn describe(activity: &Activity) -> String {
             "oneclient.cluster.security.activity.alarm",
             &[reason, caller],
         ),
+        ActivityKind::Allowed { what, caller, .. } => tf(
+            "oneclient.cluster.security.activity.allowed",
+            &[what, caller],
+        ),
         ActivityKind::Opened { target, .. } => {
             tf("oneclient.cluster.security.activity.opened", &[target])
         }

@@ -53,6 +53,14 @@ pub enum ActivityKind {
         reason: String,
         caller: String,
     },
+    /// An account change the user agreed to in the launcher
+    Allowed {
+        method: String,
+        url: String,
+        /// "change your cape"
+        what: String,
+        caller: String,
+    },
     Opened {
         target: String,
         caller: String,

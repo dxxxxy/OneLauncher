@@ -3,8 +3,10 @@
 //! The agent forwards every request it makes to a Mojang/Microsoft account
 //! host. Each one is matched against this allowlist; only matches are sent on,
 //! with the fake token swapped for the real one. Anything that would change
-//! the account itself is refused and raises the rat alarm, because no game
-//! feature ever needs it
+//! the account itself (name, skin, cape, purchases) is only sent on once the
+//! user agrees in the launcher: cosmetics menus do this, but so do rats.
+//! What no game feature ever does, like signing in with a password or joining
+//! a server as someone else, is refused and raises the rat alarm
 
 use url::Url;
 
@@ -40,9 +42,42 @@ pub enum Route {
     Plain(TokenPlacement),
 }
 
+/// What an account change does, for the question the launcher asks
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ChangeKind {
+    Name,
+    NameCheck,
+    Skin,
+    Cape,
+    Profile,
+    Purchases,
+    Redeem,
+    Settings,
+}
+
+impl ChangeKind {
+    /// An approval covers more of the same for a while (trying on capes in a
+    /// wardrobe), except where one request is already the whole damage
+    pub fn remembered(self) -> bool {
+        !matches!(self, Self::Name | Self::Redeem)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountChange {
+    pub kind: ChangeKind,
+    /// Finishes "A mod wants to ...", e.g. "change your cape"
+    pub what: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     Allow(Route),
+    /// Changes the account: sent on with the token only if the user agrees
+    Confirm {
+        placement: TokenPlacement,
+        change: AccountChange,
+    },
     Deny {
         reason: &'static str,
         /// A request no game feature makes: a mod is trying to take over or
@@ -63,6 +98,61 @@ fn alarm(reason: &'static str) -> Decision {
         reason,
         alarm: true,
     }
+}
+
+fn confirm(kind: ChangeKind, what: impl Into<String>) -> Decision {
+    Decision::Confirm {
+        placement: TokenPlacement::Bearer,
+        change: AccountChange {
+            kind,
+            what: what.into(),
+        },
+    }
+}
+
+/// `/minecraft/profile/...` beyond reading it: names, skins and capes
+fn profile_change(method: &str, path: &str) -> Decision {
+    let rest = path.trim_start_matches("/minecraft/profile");
+    let segments: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+    let name = |s: &str| {
+        percent_decode(s)
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .take(16)
+            .collect::<String>()
+    };
+    match (method, segments.as_slice()) {
+        ("GET", ["name", n, "available"]) => confirm(
+            ChangeKind::NameCheck,
+            format!("check whether the name {} is free", name(n)),
+        ),
+        ("PUT", ["name", n]) => confirm(
+            ChangeKind::Name,
+            format!("change your Minecraft name to {}", name(n)),
+        ),
+        ("GET", ["namechange"]) => {
+            confirm(ChangeKind::NameCheck, "see when you can change your name")
+        }
+        ("POST", ["skins"]) | ("PUT", ["skins", ..]) => {
+            confirm(ChangeKind::Skin, "change your skin")
+        }
+        ("DELETE", ["skins", ..]) => confirm(ChangeKind::Skin, "reset your skin"),
+        ("PUT", ["capes", "active"]) => confirm(ChangeKind::Cape, "change your cape"),
+        ("DELETE", ["capes", "active"]) => confirm(ChangeKind::Cape, "hide your cape"),
+        _ => confirm(ChangeKind::Profile, "change your Minecraft profile"),
+    }
+}
+
+fn percent_decode(s: &str) -> String {
+    url::form_urlencoded::parse(s.as_bytes())
+        .map(|(k, v)| {
+            if v.is_empty() {
+                k.into_owned()
+            } else {
+                format!("{k}={v}")
+            }
+        })
+        .collect()
 }
 
 pub fn decide(method: &str, url: &Url) -> Decision {
@@ -104,12 +194,14 @@ pub fn decide(method: &str, url: &Url) -> Decision {
                 Decision::Allow(Plain(Public))
             }
             // name, skin and cape changes, name availability probes,
-            // entitlements: account management, never gameplay
-            p if p.starts_with("/minecraft/profile") => {
-                alarm("a mod tried to change your Minecraft profile")
-            }
-            p if p.starts_with("/entitlements") || p.starts_with("/productvoucher") => {
-                alarm("a mod tried to read or redeem your purchases")
+            // entitlements: account management that cosmetics menus do
+            p if p.starts_with("/minecraft/profile") => profile_change(&method, p),
+            p if p.starts_with("/entitlements") => confirm(
+                ChangeKind::Purchases,
+                "see which Minecraft products you own",
+            ),
+            p if p.starts_with("/productvoucher") => {
+                confirm(ChangeKind::Redeem, "redeem a code on your account")
             }
             _ => deny("not an endpoint the game uses"),
         },
@@ -118,7 +210,9 @@ pub fn decide(method: &str, url: &Url) -> Decision {
                 Decision::Allow(Plain(Public))
             }
             "/profiles/minecraft" if post => Decision::Allow(Plain(Public)),
-            p if p.starts_with("/user") => alarm("a mod tried to reach your account settings"),
+            p if p.starts_with("/user") => {
+                confirm(ChangeKind::Settings, "reach your Mojang account settings")
+            }
             _ => deny("not an endpoint the game uses"),
         },
         // legacy Yggdrasil: password logins and token refresh, the launcher's
@@ -264,37 +358,71 @@ mod tests {
         );
     }
 
-    #[test]
-    fn account_changes_raise_the_alarm() {
-        for (method, url) in [
-            (
-                "PUT",
-                "https://api.minecraftservices.com/minecraft/profile/name/Notch",
-            ),
-            (
-                "POST",
-                "https://api.minecraftservices.com/minecraft/profile/skins",
-            ),
-            (
-                "DELETE",
-                "https://api.minecraftservices.com/minecraft/profile/capes/active",
-            ),
-            (
-                "GET",
-                "https://api.minecraftservices.com/minecraft/profile/namechange",
-            ),
-            (
-                "GET",
-                "https://api.minecraftservices.com/entitlements/mcstore",
-            ),
-            ("POST", "https://authserver.mojang.com/authenticate"),
-            ("GET", "https://api.mojang.com/user/security/location"),
-        ] {
-            assert!(
-                matches!(d(method, url), Decision::Deny { alarm: true, .. }),
-                "{method} {url}"
-            );
+    fn change(method: &str, url: &str) -> AccountChange {
+        match d(method, url) {
+            Decision::Confirm {
+                placement: TokenPlacement::Bearer,
+                change,
+            } => change,
+            other => panic!("{method} {url}: {other:?}"),
         }
+    }
+
+    #[test]
+    fn account_changes_ask_first() {
+        let profile = "https://api.minecraftservices.com/minecraft/profile";
+        let name = change("PUT", &format!("{profile}/name/Notch"));
+        assert_eq!(name.kind, ChangeKind::Name);
+        assert_eq!(name.what, "change your Minecraft name to Notch");
+        assert!(!name.kind.remembered());
+        // a name in the path can't smuggle text into the question
+        assert_eq!(
+            change("PUT", &format!("{profile}/name/Ev%20il%0Aclick")).what,
+            "change your Minecraft name to Evilclick"
+        );
+        assert_eq!(
+            change("GET", &format!("{profile}/name/Steve/available")).kind,
+            ChangeKind::NameCheck
+        );
+        assert_eq!(
+            change("POST", &format!("{profile}/skins")).kind,
+            ChangeKind::Skin
+        );
+        assert_eq!(
+            change("DELETE", &format!("{profile}/skins/active")).what,
+            "reset your skin"
+        );
+        let cape = change("PUT", &format!("{profile}/capes/active"));
+        assert_eq!(cape.what, "change your cape");
+        assert!(cape.kind.remembered());
+        assert_eq!(
+            change("DELETE", &format!("{profile}/capes/active")).what,
+            "hide your cape"
+        );
+        assert_eq!(
+            change(
+                "GET",
+                "https://api.minecraftservices.com/entitlements/mcstore"
+            )
+            .kind,
+            ChangeKind::Purchases
+        );
+        assert_eq!(
+            change("POST", "https://api.minecraftservices.com/productvoucher/X").kind,
+            ChangeKind::Redeem
+        );
+        assert_eq!(
+            change("GET", "https://api.mojang.com/user/security/location").kind,
+            ChangeKind::Settings
+        );
+    }
+
+    #[test]
+    fn what_no_game_does_raises_the_alarm() {
+        assert!(matches!(
+            d("POST", "https://authserver.mojang.com/authenticate"),
+            Decision::Deny { alarm: true, .. }
+        ));
     }
 
     #[test]

@@ -154,8 +154,9 @@ impl BrokerHost for LauncherBrokerHost {
         })
     }
 
-    fn confirm(&self, prompt: ConfirmPrompt) -> BoxFuture<'_, bool> {
+    fn confirm(&self, mut prompt: ConfirmPrompt) -> BoxFuture<'_, bool> {
         Box::pin(async move {
+            prompt.body = format!("{}\n\nInstance: {}", prompt.body, self.cluster_name);
             let Some(ui) = self.security.ui() else {
                 return false;
             };

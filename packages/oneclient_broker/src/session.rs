@@ -1,10 +1,12 @@
 //! One connection from one game: authenticate the agent, then answer its
 //! requests through the policy
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -14,7 +16,7 @@ use uuid::Uuid;
 
 use crate::activity::{Activity, ActivityKind};
 use crate::limiter::JoinLimiter;
-use crate::policy::{self, Decision, Route, TokenPlacement};
+use crate::policy::{self, AccountChange, ChangeKind, Decision, Route, TokenPlacement};
 use crate::protocol::{self, PickFilter, PickMode, Reply, Request};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -79,7 +81,15 @@ pub(crate) struct Shared {
     pub config: SessionConfig,
     pub host: Arc<dyn BrokerHost>,
     pub joins: Mutex<JoinLimiter>,
+    /// Account changes the user allowed, and when, so a wardrobe doesn't
+    /// ask for every cape tried on
+    allowed: Mutex<HashMap<ChangeKind, Instant>>,
+    /// One question at a time: a burst of requests waits for the first answer
+    asking: tokio::sync::Mutex<()>,
 }
+
+/// How long an approval covers more changes of the same kind
+const ALLOWED_FOR: Duration = Duration::from_secs(10 * 60);
 
 impl Shared {
     pub fn new(config: SessionConfig, host: Arc<dyn BrokerHost>) -> Arc<Self> {
@@ -87,7 +97,64 @@ impl Shared {
             config,
             host,
             joins: Mutex::new(JoinLimiter::standard()),
+            allowed: Mutex::new(HashMap::new()),
+            asking: tokio::sync::Mutex::new(()),
         })
+    }
+
+    /// Runs the question for a request to `path` on the profile host
+    #[cfg(test)]
+    pub async fn ask_for_test(&self, method: &str, path: &str) -> bool {
+        let url = Url::parse(&format!("https://api.minecraftservices.com{path}")).unwrap();
+        let Decision::Confirm { change, .. } = policy::decide(method, &url) else {
+            panic!("{method} {path} doesn't ask");
+        };
+        self.ask(&change, "").await
+    }
+
+    fn recently_allowed(&self, kind: ChangeKind) -> bool {
+        kind.remembered()
+            && self
+                .allowed
+                .lock()
+                .ok()
+                .and_then(|a| a.get(&kind).copied())
+                .is_some_and(|at| at.elapsed() < ALLOWED_FOR)
+    }
+
+    /// Asks the user whether the game may make this change
+    async fn ask(&self, change: &AccountChange, caller: &str) -> bool {
+        let _one_at_a_time = self.asking.lock().await;
+        if self.recently_allowed(change.kind) {
+            return true;
+        }
+        let who = if caller.is_empty() || caller == "minecraft" {
+            "Something in the game".to_string()
+        } else {
+            format!("Something in the game ({caller})")
+        };
+        let later = if change.kind.remembered() {
+            " If you allow it, OneClient won't ask again about this for 10 minutes."
+        } else {
+            ""
+        };
+        let allowed = self
+            .host
+            .confirm(ConfirmPrompt {
+                title: format!("Let the game {}?", change.what),
+                body: format!(
+                    "{who} wants to {}. Cosmetics and profile menus do this, but so do mods that try to take over accounts.\n\nOnly allow it if you just asked for this in the game.{later}",
+                    change.what
+                ),
+                allow: "Allow".into(),
+            })
+            .await;
+        if allowed && change.kind.remembered() {
+            if let Ok(mut a) = self.allowed.lock() {
+                a.insert(change.kind, Instant::now());
+            }
+        }
+        allowed
     }
 
     fn record(&self, kind: ActivityKind) {
@@ -248,6 +315,24 @@ async fn http(
             TokenPlacement::JsonAccessToken
         }
         Decision::Allow(Route::Plain(placement)) => placement,
+        Decision::Confirm { placement, change } => {
+            if !shared.ask(&change, &caller).await {
+                shared.record(ActivityKind::Denied {
+                    method,
+                    url,
+                    reason: format!("you didn't let the game {}", change.what),
+                    caller,
+                });
+                return forbidden();
+            }
+            shared.record(ActivityKind::Allowed {
+                method: method.clone(),
+                url: url.clone(),
+                what: change.what,
+                caller,
+            });
+            placement
+        }
         Decision::Deny { reason, alarm } => {
             let kind = if alarm {
                 ActivityKind::Alarm {

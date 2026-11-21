@@ -186,6 +186,8 @@ mod tests {
     #[derive(Default)]
     struct TestHost {
         log: Mutex<Vec<Activity>>,
+        asked: Mutex<Vec<ConfirmPrompt>>,
+        answer: bool,
     }
 
     impl BrokerHost for TestHost {
@@ -201,6 +203,12 @@ mod tests {
 
         fn pick(&self, _request: PickRequest) -> BoxFuture<'_, Option<PathBuf>> {
             Box::pin(async { None })
+        }
+
+        fn confirm(&self, prompt: ConfirmPrompt) -> BoxFuture<'_, bool> {
+            self.asked.lock().unwrap().push(prompt);
+            let answer = self.answer;
+            Box::pin(async move { answer })
         }
     }
 
@@ -257,24 +265,66 @@ mod tests {
         assert_eq!(host.log.lock().unwrap()[0].kind, ActivityKind::BadHandshake);
     }
 
+    fn rename() -> Request {
+        Request::Http {
+            method: "PUT".into(),
+            url: "https://api.minecraftservices.com/minecraft/profile/name/Taken".into(),
+            headers: vec![("Authorization".into(), "Bearer FAKE".into())],
+            body: vec![],
+            caller: "mods/rat.jar".into(),
+        }
+    }
+
     #[tokio::test]
-    async fn account_changes_are_refused_without_touching_the_network() {
+    async fn account_changes_the_user_refuses_never_touch_the_network() {
         let host = Arc::new(TestHost::default());
-        let reply = session::handle(
-            &shared(host.clone()),
-            Request::Http {
-                method: "PUT".into(),
-                url: "https://api.minecraftservices.com/minecraft/profile/name/Taken".into(),
-                headers: vec![("Authorization".into(), "Bearer FAKE".into())],
-                body: vec![],
-                caller: "mods/rat.jar".into(),
-            },
-        )
-        .await;
+        let reply = session::handle(&shared(host.clone()), rename()).await;
 
         assert!(matches!(reply, Reply::Http { status: 403, .. }));
         let log = host.log.lock().unwrap();
-        assert!(log[0].is_alarm());
+        assert!(
+            matches!(&log[0].kind, ActivityKind::Denied { reason, .. } if reason.contains("name to Taken")),
+            "{log:?}"
+        );
+        let asked = host.asked.lock().unwrap();
+        assert_eq!(asked.len(), 1);
+        assert!(
+            asked[0]
+                .title
+                .contains("change your Minecraft name to Taken")
+        );
+        assert!(asked[0].body.contains("mods/rat.jar"));
+    }
+
+    #[tokio::test]
+    async fn an_allowed_cape_change_covers_the_next_ones() {
+        let host = Arc::new(TestHost {
+            answer: true,
+            ..Default::default()
+        });
+        let shared = shared(host.clone());
+        assert!(
+            shared
+                .ask_for_test("PUT", "/minecraft/profile/capes/active")
+                .await
+        );
+        assert!(
+            shared
+                .ask_for_test("DELETE", "/minecraft/profile/capes/active")
+                .await
+        );
+        // names are never remembered
+        assert!(
+            shared
+                .ask_for_test("PUT", "/minecraft/profile/name/A")
+                .await
+        );
+        assert!(
+            shared
+                .ask_for_test("PUT", "/minecraft/profile/name/B")
+                .await
+        );
+        assert_eq!(host.asked.lock().unwrap().len(), 3);
     }
 
     #[tokio::test]

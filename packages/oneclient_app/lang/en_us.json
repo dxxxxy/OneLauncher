@@ -2647,6 +2647,7 @@
   "oneclient.cluster.security.activity.denied": "Blocked %1$s %2$s",
   "oneclient.cluster.security.activity.discord_denied": "Blocked a Discord request (%1$s). Games can only set rich presence",
   "oneclient.cluster.security.activity.alarm": "Blocked: %1$s (%2$s)",
+  "oneclient.cluster.security.activity.allowed": "You let the game %1$s (%2$s)",
   "oneclient.cluster.security.activity.opened": "Opened %1$s",
   "oneclient.cluster.security.activity.open_refused": "Didn't open %1$s",
   "oneclient.cluster.security.activity.picked": "Shared a file you picked: %1$s",
