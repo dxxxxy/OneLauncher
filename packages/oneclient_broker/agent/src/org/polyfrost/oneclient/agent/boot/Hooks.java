@@ -23,6 +23,15 @@ public final class Hooks {
 
     private Hooks() {}
 
+    /**
+     * A class of the library that {@code patched} (a class the agent patched,
+     * dotted name) belongs to, loaded by the same loader.
+     */
+    static Class<?> libraryClass(String patched, String name) throws ClassNotFoundException {
+        ClassLoader loader = Transformer.loaderOf(patched);
+        return Class.forName(name, true, loader != null ? loader : ClassLoader.getSystemClassLoader());
+    }
+
     // ---- java.io.File(String) and RandomAccessFile: Discord IPC
 
     /**

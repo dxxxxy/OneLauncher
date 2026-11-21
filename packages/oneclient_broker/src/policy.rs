@@ -16,6 +16,8 @@ pub const BROKERED_HOSTS: &[&str] = &[
     "authserver.mojang.com",
     "pc.realms.minecraft.net",
     "java.frontendlegacy.realms.minecraft-services.net",
+    // 26.3 Realms, which added invite codes
+    "java.frontend.realms.minecraft-services.net",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,7 +124,9 @@ pub fn decide(method: &str, url: &Url) -> Decision {
         // legacy Yggdrasil: password logins and token refresh, the launcher's
         // job only
         "authserver.mojang.com" => alarm("a mod tried to sign in to or out of your account"),
-        "pc.realms.minecraft.net" | "java.frontendlegacy.realms.minecraft-services.net" => {
+        "pc.realms.minecraft.net"
+        | "java.frontendlegacy.realms.minecraft-services.net"
+        | "java.frontend.realms.minecraft-services.net" => {
             Decision::Allow(Plain(RealmsCookie))
         }
         _ => deny("not an account host"),
@@ -244,6 +248,13 @@ mod tests {
         );
         assert_eq!(
             d("GET", "https://pc.realms.minecraft.net/worlds"),
+            Decision::Allow(Route::Plain(TokenPlacement::RealmsCookie))
+        );
+        assert_eq!(
+            d(
+                "POST",
+                "https://java.frontend.realms.minecraft-services.net/invites/code"
+            ),
             Decision::Allow(Route::Plain(TokenPlacement::RealmsCookie))
         );
         assert_eq!(

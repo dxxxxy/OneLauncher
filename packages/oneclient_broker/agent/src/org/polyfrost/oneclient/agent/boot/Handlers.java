@@ -15,6 +15,8 @@ public final class Handlers {
         "authserver.mojang.com",
         "pc.realms.minecraft.net",
         "java.frontendlegacy.realms.minecraft-services.net",
+        // 26.3 Realms (invite codes)
+        "java.frontend.realms.minecraft-services.net",
     };
 
     private static volatile URLStreamHandler http;

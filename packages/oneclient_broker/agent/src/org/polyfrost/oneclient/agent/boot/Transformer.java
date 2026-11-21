@@ -5,6 +5,8 @@ import java.security.ProtectionDomain;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
 import org.polyfrost.oneclient.agent.boot.Patcher.Kind;
@@ -79,6 +81,18 @@ final class Transformer implements ClassFileTransformer {
     /** Patched classes outside the JDK that may live in a named module. */
     private static final ConcurrentLinkedQueue<Object[]> toFix = new ConcurrentLinkedQueue<Object[]>();
 
+    /**
+     * The loader of each patched library class, so hooks can reach that
+     * library's other classes (LWJGL's MemoryUtil, a mod's response types)
+     * by reflection; the agent itself can't see them.
+     */
+    private static final Map<String, ClassLoader> loaders = new ConcurrentHashMap<String, ClassLoader>();
+
+    /** The loader that defined the patched class {@code name} (dotted), or null. */
+    static ClassLoader loaderOf(String name) {
+        return loaders.get(name);
+    }
+
     public byte[] transform(ClassLoader loader, String name, Class<?> redefined, ProtectionDomain domain,
             byte[] bytes) {
         if (name == null) return null;
@@ -107,7 +121,9 @@ final class Transformer implements ClassFileTransformer {
 
             byte[] patched = Patcher.patch(bytes, targets);
             if (patched != null && loader != null) {
-                toFix.add(new Object[] {loader, name.replace('/', '.')});
+                String dotted = name.replace('/', '.');
+                loaders.put(dotted, loader);
+                toFix.add(new Object[] {loader, dotted});
             }
             return patched;
         } catch (Throwable t) {

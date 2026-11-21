@@ -23,10 +23,15 @@ import java.util.List;
  *            if_acmpeq L; checkcast T; areturn;                         L: pop; nop*
  * INT:       ... if_acmpeq L; checkcast Integer; invokevirtual intValue; ireturn; L: pop; nop*
  * REWRITE:   aload n; invokestatic hook(Object)Object; checkcast T; astore n; nop*
+ * TYPED:     load every argument by its type; invokestatic hook(..)Object; dup;
+ *            getstatic PASS; if_acmpeq L; unbox by return type; xreturn; L: pop; nop*
  * </pre>
  *
  * REWRITE replaces argument {@code n} and then runs the original code, so it
- * also works on constructors.
+ * also works on constructors. TYPED passes the receiver (if any) and every
+ * argument, primitives as themselves and references as Object, so hooks can
+ * take the {@code long} handles and {@code int} flags of native bindings;
+ * the result is unboxed by the method's return type ({@code V} ignores it).
  *
  * <p>The prologue is padded to a multiple of 4 bytes so tableswitch and
  * lookupswitch alignment in the original code is unchanged. Branch offsets in
@@ -35,14 +40,14 @@ import java.util.List;
  * frame is inserted for {@code L} (REWRITE has no branch and needs none).
  */
 final class Patcher {
-    enum Kind { VOID_BOOL, OBJECT, INT, REWRITE }
+    enum Kind { VOID_BOOL, OBJECT, INT, REWRITE, TYPED }
 
     static final class Target {
         final String name;
         /** Exact descriptor, or a suffix when {@code suffix} is set. */
         final String desc;
         final boolean suffix;
-        /** Reference locals passed to the hook; for REWRITE, the one local replaced */
+        /** Reference locals passed to the hook; for REWRITE, the one local replaced; unused by TYPED */
         final int loads;
         final String hook;
         final String hookDesc;
@@ -64,12 +69,38 @@ final class Patcher {
             this.hookDesc = d.toString();
         }
 
+        /** TYPED: the receiver and the arguments of {@code methodDesc}, references as Object. */
+        static String typedHookDesc(boolean isStatic, String methodDesc) {
+            StringBuilder d = new StringBuilder("(");
+            if (!isStatic) d.append("Ljava/lang/Object;");
+            for (char c : argumentSorts(methodDesc)) d.append(c == 'L' ? "Ljava/lang/Object;" : String.valueOf(c));
+            return d.append(")Ljava/lang/Object;").toString();
+        }
+
         boolean matches(String n, String d) {
             return name.equals(n) && (suffix ? d.endsWith(desc) : desc.equals(d));
         }
     }
 
     static final String HOOKS = "org/polyfrost/oneclient/agent/boot/Hooks";
+
+    /** One char per argument: its primitive descriptor, or 'L' for any reference (arrays too). */
+    static char[] argumentSorts(String desc) {
+        StringBuilder sorts = new StringBuilder();
+        int i = 1;
+        while (desc.charAt(i) != ')') {
+            char c = desc.charAt(i);
+            if (c == 'L' || c == '[') {
+                while (desc.charAt(i) == '[') i++;
+                if (desc.charAt(i) == 'L') i = desc.indexOf(';', i);
+                sorts.append('L');
+            } else {
+                sorts.append(c);
+            }
+            i++;
+        }
+        return sorts.toString().toCharArray();
+    }
 
     // ---- constant pool
 
@@ -219,7 +250,7 @@ final class Patcher {
                 if (!target.matches(n, d) || (n.equals("<init>") && target.kind != Kind.REWRITE)) continue;
                 for (Attribute a : attributes) {
                     if (utf8At(a.name).equals("Code")) {
-                        a.data = patchCode(a.data, target);
+                        a.data = patchCode(a.data, target, (access & 0x0008) != 0, d);
                         changed = true;
                     }
                 }
@@ -249,7 +280,7 @@ final class Patcher {
         return result.toByteArray();
     }
 
-    private byte[] patchCode(byte[] data, Target target) throws IOException {
+    private byte[] patchCode(byte[] data, Target target, boolean isStatic, String methodDesc) throws IOException {
         DataInputStream in = new DataInputStream(new ByteArrayInputStream(data));
         int maxStack = in.readUnsignedShort();
         int maxLocals = in.readUnsignedShort();
@@ -263,16 +294,26 @@ final class Patcher {
         // ---- prologue
         ByteArrayOutputStream p = new ByteArrayOutputStream();
         DataOutputStream pro = new DataOutputStream(p);
-        for (int i = 0; i < target.loads && target.kind != Kind.REWRITE; i++) {
-            if (i <= 3) {
-                pro.writeByte(0x2a + i); // aload_<i>
-            } else {
-                pro.writeByte(0x19); // aload
-                pro.writeByte(i);
+        String hookDesc = target.hookDesc;
+        int slots = target.loads;
+        if (target.kind == Kind.TYPED) {
+            hookDesc = Target.typedHookDesc(isStatic, methodDesc);
+            slots = 0;
+            if (!isStatic) local(pro, 0x19, 0x2a, slots++);
+            for (char c : argumentSorts(methodDesc)) {
+                switch (c) {
+                    case 'J': local(pro, 0x16, 0x1e, slots); slots += 2; break; // lload
+                    case 'D': local(pro, 0x18, 0x26, slots); slots += 2; break; // dload
+                    case 'F': local(pro, 0x17, 0x22, slots++); break; // fload
+                    case 'L': local(pro, 0x19, 0x2a, slots++); break; // aload
+                    default: local(pro, 0x15, 0x1a, slots++); break; // iload (Z B C S I)
+                }
             }
+        } else {
+            for (int i = 0; i < target.loads && target.kind != Kind.REWRITE; i++) local(pro, 0x19, 0x2a, i);
         }
         pro.writeByte(0xb8); // invokestatic
-        pro.writeShort(member(10, HOOKS, target.hook, target.hookDesc));
+        pro.writeShort(member(10, HOOKS, target.hook, hookDesc));
         int label;
         if (target.kind == Kind.REWRITE) {
             // the argument goes in before the call, comes back cast to its type
@@ -300,6 +341,8 @@ final class Patcher {
                 t.writeByte(0xc0); // checkcast
                 t.writeShort(classRef(target.cast));
                 t.writeByte(0xb0); // areturn
+            } else if (target.kind == Kind.TYPED) {
+                unboxAndReturn(t, methodDesc.substring(methodDesc.indexOf(')') + 1));
             } else {
                 t.writeByte(0xc0);
                 t.writeShort(classRef("java/lang/Integer"));
@@ -345,8 +388,8 @@ final class Patcher {
 
         ByteArrayOutputStream result = new ByteArrayOutputStream(data.length + shift + 16);
         DataOutputStream out = new DataOutputStream(result);
-        out.writeShort(Math.max(maxStack, Math.max(target.loads, 3) + 1));
-        out.writeShort(Math.max(maxLocals, target.loads));
+        out.writeShort(Math.max(maxStack, Math.max(slots, 3) + 1));
+        out.writeShort(Math.max(maxLocals, slots));
         out.writeInt(code.length + shift);
         out.write(prologue);
         out.write(code);
@@ -359,7 +402,42 @@ final class Patcher {
         return result.toByteArray();
     }
 
-    /** {@code aload n} / {@code astore n}, short forms for 0-3 */
+    /** The hook's non-PASS result on the stack, returned as the method's own type. */
+    private void unboxAndReturn(DataOutputStream t, String ret) throws IOException {
+        char c = ret.charAt(0);
+        if (c == 'V') {
+            t.writeByte(0x57); // pop
+            t.writeByte(0xb1); // return
+            return;
+        }
+        if (c == 'L' || c == '[') {
+            t.writeByte(0xc0); // checkcast
+            t.writeShort(classRef(c == 'L' ? ret.substring(1, ret.length() - 1) : ret));
+            t.writeByte(0xb0); // areturn
+            return;
+        }
+        // booleans and chars through their wrappers, other numbers through
+        // Number so a hook may return any boxed number
+        String owner;
+        String getter;
+        String getterDesc;
+        int op;
+        switch (c) {
+            case 'Z': owner = "java/lang/Boolean"; getter = "booleanValue"; getterDesc = "()Z"; op = 0xac; break;
+            case 'C': owner = "java/lang/Character"; getter = "charValue"; getterDesc = "()C"; op = 0xac; break;
+            case 'J': owner = "java/lang/Number"; getter = "longValue"; getterDesc = "()J"; op = 0xad; break;
+            case 'F': owner = "java/lang/Number"; getter = "floatValue"; getterDesc = "()F"; op = 0xae; break;
+            case 'D': owner = "java/lang/Number"; getter = "doubleValue"; getterDesc = "()D"; op = 0xaf; break;
+            default: owner = "java/lang/Number"; getter = "intValue"; getterDesc = "()I"; op = 0xac; break;
+        }
+        t.writeByte(0xc0); // checkcast
+        t.writeShort(classRef(owner));
+        t.writeByte(0xb6); // invokevirtual
+        t.writeShort(member(10, owner, getter, getterDesc));
+        t.writeByte(op);
+    }
+
+    /** {@code xload n} / {@code xstore n}, short forms for 0-3 */
     private static void local(DataOutputStream out, int wide, int shortBase, int index) throws IOException {
         if (index <= 3) {
             out.writeByte(shortBase + index);
