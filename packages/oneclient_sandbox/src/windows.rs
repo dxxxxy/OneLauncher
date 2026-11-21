@@ -61,6 +61,9 @@ use crate::{Protection, SandboxError, SandboxPolicy, SandboxResult, SpawnSpec};
 const SE_GROUP_ENABLED: u32 = 4;
 const RUNTIME_CAPABILITY: &str = "oneclientRuntime";
 const INTERNET_CLIENT: &str = "S-1-15-3-1";
+/// Inbound connections from the internet: Poly+ parties and voice (EOS
+/// peer to peer) and servers the game hosts itself
+const INTERNET_CLIENT_SERVER: &str = "S-1-15-3-2";
 const PRIVATE_NETWORK: &str = "S-1-15-3-3";
 const MARKER: &str = ".oneclient-acl-v1";
 
@@ -479,6 +482,7 @@ impl Container {
 
         let mut capabilities = vec![
             Sid::from_string(INTERNET_CLIENT)?,
+            Sid::from_string(INTERNET_CLIENT_SERVER)?,
             Sid::from_string(PRIVATE_NETWORK)?,
             runtime,
         ];
