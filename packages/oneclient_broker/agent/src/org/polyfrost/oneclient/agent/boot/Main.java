@@ -34,7 +34,7 @@ public final class Main {
         if (Hooks.sandboxed) {
             retransformLoaded(inst, "java.lang.ProcessBuilder", "java.awt.Desktop", "javax.swing.JFileChooser",
                     "java.io.RandomAccessFile", "java.io.File", "sun.nio.fs.WindowsPath",
-                    "sun.nio.fs.WindowsFileSystemProvider");
+                    "sun.nio.fs.WindowsFileSystemProvider", "java.io.WinNTFileSystem");
             Transformer.startModuleFixer();
         }
 

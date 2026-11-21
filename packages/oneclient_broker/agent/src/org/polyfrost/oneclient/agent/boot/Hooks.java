@@ -174,6 +174,21 @@ public final class Hooks {
         }
     }
 
+    // ---- java.io.WinNTFileSystem#getNameMax
+
+    private static final Integer NAME_MAX = Integer.valueOf(255);
+
+    /**
+     * Java 25's File.createTempFile asks the volume for its longest file name,
+     * and an AppContainer may not query volume information, so every temporary
+     * file failed with "Access is denied" (JNA could not unpack itself). Every
+     * Windows file system in use (NTFS, ReFS, exFAT, FAT32 long names) allows
+     * 255, which is all createTempFile needs to trim its prefix.
+     */
+    public static Object nameMax(Object fileSystem, Object path) {
+        return sandboxed ? NAME_MAX : PASS;
+    }
+
     // ---- LWJGL 2 fullscreen (Windows)
 
     /**
