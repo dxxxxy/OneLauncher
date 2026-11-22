@@ -18,7 +18,9 @@ pub enum Take {
     Allowed,
     /// Refused; `first` for the first refusal since the last allowed join,
     /// so a mod retrying in a loop is reported once rather than every time
-    Paused { first: bool },
+    Paused {
+        first: bool,
+    },
 }
 
 impl JoinLimiter {
@@ -72,7 +74,10 @@ mod tests {
         assert_eq!(limiter.try_take_at(start), Take::Allowed);
         let later = |secs| start + Duration::from_secs(secs);
         assert_eq!(limiter.try_take_at(later(30)), Take::Paused { first: true });
-        assert_eq!(limiter.try_take_at(later(31)), Take::Paused { first: false });
+        assert_eq!(
+            limiter.try_take_at(later(31)),
+            Take::Paused { first: false }
+        );
         assert_eq!(limiter.try_take_at(later(61)), Take::Allowed);
         assert_eq!(limiter.try_take_at(later(62)), Take::Paused { first: true });
     }

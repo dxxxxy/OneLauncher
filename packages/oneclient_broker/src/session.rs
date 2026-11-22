@@ -286,7 +286,11 @@ pub(crate) async fn serve(
         let shared = Arc::clone(&shared);
         let tx = tx.clone();
         tokio::spawn(async move {
-            let reply = handle(&shared, request).await;
+            // a host that panics still owes the game an answer, or it waits
+            // out its whole timeout
+            let reply = tokio::spawn(async move { handle(&shared, request).await })
+                .await
+                .unwrap_or_else(|_| Reply::Error("OneClient failed to handle this request".into()));
             let _ = tx.send(protocol::encode_reply(id, &reply)).await;
         });
     }

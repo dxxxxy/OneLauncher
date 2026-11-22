@@ -190,6 +190,7 @@ mod tests {
         log: Mutex<Vec<Activity>>,
         asked: Mutex<Vec<ConfirmPrompt>>,
         answer: bool,
+        broken: bool,
     }
 
     impl BrokerHost for TestHost {
@@ -211,6 +212,10 @@ mod tests {
             self.asked.lock().unwrap().push(prompt);
             let answer = self.answer;
             Box::pin(async move { answer })
+        }
+
+        fn add_account(&self) {
+            assert!(!self.broken, "the launcher's UI isn't reachable");
         }
     }
 
@@ -265,6 +270,50 @@ mod tests {
                 .is_none()
         );
         assert_eq!(host.log.lock().unwrap()[0].kind, ActivityKind::BadHandshake);
+    }
+
+    #[tokio::test]
+    async fn a_failing_host_still_answers() {
+        let host = Arc::new(TestHost {
+            broken: true,
+            ..TestHost::default()
+        });
+        let (mut agent_up, broker_up) = tokio::io::duplex(4096);
+        let (broker_down, mut agent_down) = tokio::io::duplex(4096);
+        let broker = tokio::spawn(session::serve(shared(host), broker_up, broker_down));
+
+        for (id, request) in [
+            (
+                1,
+                Request::Hello {
+                    key: "KEY".into(),
+                    agent_version: "t".into(),
+                },
+            ),
+            (
+                2,
+                Request::AddAccount {
+                    caller: String::new(),
+                },
+            ),
+        ] {
+            let frame = protocol::encode_request(id, &request);
+            protocol::write_frame(&mut agent_up, &frame).await.unwrap();
+        }
+
+        let mut replies = Vec::new();
+        for _ in 0..2 {
+            let frame = protocol::read_frame(&mut agent_down)
+                .await
+                .unwrap()
+                .unwrap();
+            replies.push(protocol::decode_reply(&frame).unwrap());
+        }
+        assert!(matches!(replies[0], (1, Reply::Ok)));
+        assert!(matches!(&replies[1], (2, Reply::Error(e)) if e.contains("failed")));
+
+        drop(agent_up);
+        broker.await.unwrap().unwrap();
     }
 
     fn rename() -> Request {
