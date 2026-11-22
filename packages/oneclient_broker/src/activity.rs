@@ -29,6 +29,9 @@ impl Activity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ActivityKind {
+    /// The launcher started the game; everything after it belongs to this
+    /// launch
+    Launched,
     Connected {
         agent_version: String,
     },

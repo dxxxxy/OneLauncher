@@ -1729,6 +1729,14 @@ async fn protect_launch(
         None
     };
 
+    // marks where this launch's activity starts
+    if broker.is_some() || sandbox.is_sandboxed() {
+        state.security.push(oneclient_broker::Activity::now(
+            cluster.id,
+            oneclient_broker::ActivityKind::Launched,
+        ));
+    }
+
     let saved = crate::security::SavedSession {
         broker: broker.as_ref().map(|(descriptor, _)| descriptor.clone()),
         discord: discord.as_ref().map(|relay| relay.path().to_path_buf()),
