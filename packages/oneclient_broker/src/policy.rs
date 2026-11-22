@@ -3,11 +3,13 @@
 //! The agent forwards every request it makes to a Mojang/Microsoft account
 //! host. Each one is matched against this allowlist; only matches are sent on,
 //! with the fake token swapped for the real one. Anything that would change
-//! the account itself (name, skin, cape, purchases) is only sent on once the
-//! user agrees in the launcher: cosmetics menus do this, but so do rats.
-//! What no game feature ever does, like signing in with a password or joining
-//! a server as someone else, is refused and raises the rat alarm
+//! the account itself (name, skin, cape, purchases) follows what the user
+//! chose for that kind of change, or asks them in the launcher: cosmetics
+//! menus do this, but so do rats. What no game feature ever does, like
+//! signing in with a password or joining a server as someone else, is
+//! refused and raises the rat alarm
 
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 /// Hosts the agent routes through the broker instead of the network
@@ -46,7 +48,6 @@ pub enum Route {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChangeKind {
     Name,
-    NameCheck,
     Skin,
     Cape,
     Profile,
@@ -55,12 +56,14 @@ pub enum ChangeKind {
     Settings,
 }
 
-impl ChangeKind {
-    /// An approval covers more of the same for a while (trying on capes in a
-    /// wardrobe), except where one request is already the whole damage
-    pub fn remembered(self) -> bool {
-        !matches!(self, Self::Name | Self::Redeem)
-    }
+/// What the user chose for a kind of account change
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeRule {
+    #[default]
+    Allow,
+    Ask,
+    Deny,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,17 +125,14 @@ fn profile_change(method: &str, path: &str) -> Decision {
             .collect::<String>()
     };
     match (method, segments.as_slice()) {
-        ("GET", ["name", n, "available"]) => confirm(
-            ChangeKind::NameCheck,
-            format!("check whether the name {} is free", name(n)),
-        ),
+        // looking a name up changes nothing
+        ("GET", ["name", _, "available"]) | ("GET", ["namechange"]) => {
+            Decision::Allow(Route::Plain(TokenPlacement::Bearer))
+        }
         ("PUT", ["name", n]) => confirm(
             ChangeKind::Name,
             format!("change your Minecraft name to {}", name(n)),
         ),
-        ("GET", ["namechange"]) => {
-            confirm(ChangeKind::NameCheck, "see when you can change your name")
-        }
         ("POST", ["skins"]) | ("PUT", ["skins", ..]) => {
             confirm(ChangeKind::Skin, "change your skin")
         }
@@ -389,16 +389,17 @@ mod tests {
         let name = change("PUT", &format!("{profile}/name/Notch"));
         assert_eq!(name.kind, ChangeKind::Name);
         assert_eq!(name.what, "change your Minecraft name to Notch");
-        assert!(!name.kind.remembered());
         // a name in the path can't smuggle text into the question
         assert_eq!(
             change("PUT", &format!("{profile}/name/Ev%20il%0Aclick")).what,
             "change your Minecraft name to Evilclick"
         );
-        assert_eq!(
-            change("GET", &format!("{profile}/name/Steve/available")).kind,
-            ChangeKind::NameCheck
-        );
+        for lookup in ["name/Steve/available", "namechange"] {
+            assert_eq!(
+                d("GET", &format!("{profile}/{lookup}")),
+                Decision::Allow(Route::Plain(TokenPlacement::Bearer))
+            );
+        }
         assert_eq!(
             change("POST", &format!("{profile}/skins")).kind,
             ChangeKind::Skin
@@ -409,7 +410,6 @@ mod tests {
         );
         let cape = change("PUT", &format!("{profile}/capes/active"));
         assert_eq!(cape.what, "change your cape");
-        assert!(cape.kind.remembered());
         assert_eq!(
             change("DELETE", &format!("{profile}/capes/active")).what,
             "hide your cape"

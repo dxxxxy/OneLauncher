@@ -30,6 +30,7 @@ use uuid::Uuid;
 
 pub use activity::{Activity, ActivityKind};
 pub use discord::DiscordRelay;
+pub use policy::{ChangeKind, ChangeRule};
 pub use protocol::{GameAccount, PickFilter, PickMode};
 pub use session::{
     BoxFuture, BrokerHost, ConfirmPrompt, OpenTarget, PickRequest, WantedDownload, validate_open,
@@ -191,6 +192,7 @@ mod tests {
         asked: Mutex<Vec<ConfirmPrompt>>,
         answer: bool,
         broken: bool,
+        rule: Option<ChangeRule>,
     }
 
     impl BrokerHost for TestHost {
@@ -216,6 +218,11 @@ mod tests {
 
         fn add_account(&self) {
             assert!(!self.broken, "the launcher's UI isn't reachable");
+        }
+
+        fn change_rule(&self, _kind: ChangeKind) -> BoxFuture<'_, ChangeRule> {
+            let rule = self.rule.unwrap_or(ChangeRule::Ask);
+            Box::pin(async move { rule })
         }
     }
 
@@ -400,34 +407,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_allowed_cape_change_covers_the_next_ones() {
-        let host = Arc::new(TestHost {
-            answer: true,
-            ..Default::default()
-        });
-        let shared = shared(host.clone());
-        assert!(
-            shared
-                .ask_for_test("PUT", "/minecraft/profile/capes/active")
-                .await
-        );
-        assert!(
-            shared
-                .ask_for_test("DELETE", "/minecraft/profile/capes/active")
-                .await
-        );
-        // names are never remembered
-        assert!(
-            shared
-                .ask_for_test("PUT", "/minecraft/profile/name/A")
-                .await
-        );
-        assert!(
-            shared
-                .ask_for_test("PUT", "/minecraft/profile/name/B")
-                .await
-        );
-        assert_eq!(host.asked.lock().unwrap().len(), 3);
+    async fn account_changes_follow_the_users_choice() {
+        for (rule, answer, allowed, asked) in [
+            (ChangeRule::Allow, false, true, 0),
+            (ChangeRule::Deny, true, false, 0),
+            (ChangeRule::Ask, true, true, 2),
+            (ChangeRule::Ask, false, false, 2),
+        ] {
+            let host = Arc::new(TestHost {
+                answer,
+                rule: Some(rule),
+                ..Default::default()
+            });
+            let shared = shared(host.clone());
+            // an answer covers that one change only
+            for _ in 0..2 {
+                let permitted = shared
+                    .permit_for_test("PUT", "/minecraft/profile/capes/active")
+                    .await;
+                assert_eq!(permitted.is_ok(), allowed, "{rule:?}: {permitted:?}");
+            }
+            assert_eq!(host.asked.lock().unwrap().len(), asked, "{rule:?}");
+        }
     }
 
     #[tokio::test]
