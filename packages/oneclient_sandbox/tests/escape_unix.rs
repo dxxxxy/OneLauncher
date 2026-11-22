@@ -95,11 +95,25 @@ impl Drop for Layout {
     }
 }
 
-fn bwrap_installed() -> bool {
-    cfg!(target_os = "linux")
-        && ["/usr/bin/bwrap", "/usr/local/bin/bwrap"]
-            .iter()
-            .any(|p| Path::new(p).exists())
+/// Whether bubblewrap runs here, the way the sandbox itself checks: being
+/// installed isn't enough where user namespaces are blocked (Ubuntu 24.04's
+/// AppArmor, hardened kernels), and there the sandbox falls back to Landlock
+fn bwrap_works() -> bool {
+    use std::sync::OnceLock;
+    static WORKS: OnceLock<bool> = OnceLock::new();
+    *WORKS.get_or_init(|| {
+        cfg!(target_os = "linux")
+            && ["/usr/bin/bwrap", "/usr/local/bin/bwrap"]
+                .iter()
+                .any(|path| {
+                    std::process::Command::new(path)
+                        .args(["--ro-bind", "/", "/", "--", "/bin/true"])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                        .is_ok_and(|s| s.success())
+                })
+    })
 }
 
 /// Every sandbox backend this machine has, by name
@@ -112,7 +126,7 @@ async fn backends(policy: &SandboxPolicy) -> Vec<(&'static str, Prepared)> {
     } else {
         let name = if cfg!(target_os = "macos") {
             "seatbelt"
-        } else if bwrap_installed() {
+        } else if bwrap_works() {
             "bubblewrap"
         } else {
             "landlock"
@@ -120,7 +134,7 @@ async fn backends(policy: &SandboxPolicy) -> Vec<(&'static str, Prepared)> {
         found.push((name, default));
     }
     #[cfg(target_os = "linux")]
-    if bwrap_installed() {
+    if bwrap_works() {
         match oneclient_sandbox::prepare_landlock(policy).await {
             Ok(landlock) => {
                 eprintln!("landlock protection: {:?}", landlock.protection);
@@ -241,8 +255,8 @@ async fn bubblewrap_hides_the_session_bus() {
         eprintln!("skipping: no XDG_RUNTIME_DIR");
         return;
     };
-    if !bus.exists() || !bwrap_installed() {
-        eprintln!("skipping: no session bus or no bubblewrap here");
+    if !bus.exists() || !bwrap_works() {
+        eprintln!("skipping: no session bus, or bubblewrap doesn't run here");
         return;
     }
     let layout = Layout::new("bus");
@@ -263,8 +277,8 @@ async fn bubblewrap_hides_the_session_bus() {
 #[tokio::test(flavor = "multi_thread")]
 async fn offline_sandboxes_have_no_network() {
     let curl = Path::new("/usr/bin/curl");
-    if !curl.exists() || !bwrap_installed() {
-        eprintln!("skipping: no curl or no bubblewrap here");
+    if !curl.exists() || !bwrap_works() {
+        eprintln!("skipping: no curl, or bubblewrap doesn't run here");
         return;
     }
     let layout = Layout::new("net");
@@ -306,8 +320,8 @@ async fn offline_sandboxes_have_no_network() {
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn killing_the_sandbox_stops_the_game() {
-    if !bwrap_installed() {
-        eprintln!("skipping: no bubblewrap here");
+    if !bwrap_works() {
+        eprintln!("skipping: bubblewrap doesn't run here");
         return;
     }
     let layout = Layout::new("kill");
