@@ -2612,7 +2612,6 @@
   "oneclient.wardrobe.wear.wearing": "Wearing %s",
   "oneclient.wardrobe.wear.wearing_done": "Wearing %s.",
   "oneclient.cluster.security.status.full": "Fully protected: mods can only see this instance, and the game never holds your Minecraft token.",
-  "oneclient.cluster.security.status.title": "This instance isn't fully protected",
   "oneclient.cluster.security.status.partial": "Partly protected: %1$s",
   "oneclient.cluster.security.status.off": "Not sandboxed: %1$s. Mods can read your files.",
   "oneclient.cluster.security.sandbox.title": "Sandbox",
@@ -2635,8 +2634,7 @@
   "oneclient.cluster.security.folders.picker": "Choose a folder to share with this instance",
   "oneclient.cluster.security.folders.refused": "OneClient won't share that folder: it holds %1$s.",
   "oneclient.cluster.security.folders.refused_title": "Folder not shared",
-  "oneclient.cluster.security.activity.title": "Activity",
-  "oneclient.cluster.security.activity.description": "What mods in this instance did with your account and your desktop.",
+  "oneclient.cluster.security.activity.description": "What mods in this instance did with your account and your desktop, newest launch first.",
   "oneclient.cluster.security.activity.empty": "Nothing yet.",
   "oneclient.cluster.security.activity.bad_handshake": "Turned away a program that tried to use this game's account connection",
   "oneclient.cluster.security.activity.join": "Signed in to a server (%1$s)",
@@ -2654,9 +2652,8 @@
   "oneclient.cluster.security.activity.trashed": "Moved %1$s to the trash",
   "oneclient.cluster.security.activity.trash_refused": "Didn't move %1$s to the trash",
   "oneclient.cluster.security.activity.sensitive": "Blocked %1$s from reading %2$s",
-  "oneclient.cluster.security.section.protection": "PROTECTION",
+  "oneclient.cluster.security.section.protection": "SANDBOX",
   "oneclient.cluster.security.section.changes": "PROFILE CHANGES",
-  "oneclient.cluster.security.section.folders": "SHARED FOLDERS",
   "oneclient.cluster.security.section.activity": "ACTIVITY",
   "oneclient.cluster.security.changes.allow": "Allow",
   "oneclient.cluster.security.changes.ask": "Ask First",
@@ -2701,5 +2698,7 @@
   "oneclient.cluster.security.suspects.title": "Mods that set off alarms",
   "oneclient.cluster.security.suspects.body": "These tried things no legitimate mod does, like signing in as you or reading private files. OneClient stopped them. Remove mods you don't trust; the names come from the game and a malicious mod can fake them.",
   "oneclient.cluster.security.suspects.line": "%1$s: %2$s times",
-  "oneclient.cluster.security.suspects.unknown": "An unknown mod"
+  "oneclient.cluster.security.suspects.unknown": "An unknown mod",
+  "oneclient.cluster.security.sandbox.off_note": "Microphone, servers on this computer and shared folders only apply while the sandbox is on.",
+  "oneclient.cluster.security.overview.reach.everything": "Everything you can: all your files, apps and saved logins"
 }

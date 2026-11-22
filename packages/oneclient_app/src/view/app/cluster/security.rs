@@ -37,19 +37,6 @@ fn sandbox_description(on: bool, protection: Option<&Protection>) -> String {
     }
 }
 
-/// Partial and off launches get a card that says what's missing
-fn protection_card(protection: Option<&Protection>) -> Option<Element> {
-    let body = match protection? {
-        Protection::Full => return None,
-        Protection::Partial(gaps) => tf(
-            "oneclient.cluster.security.status.partial",
-            &[&gaps.join(" ")],
-        ),
-        Protection::Off(reason) => tf("oneclient.cluster.security.status.off", &[reason]),
-    };
-    Some(caution_card(t("oneclient.cluster.security.status.title"), body).into_element())
-}
-
 fn describe(activity: &Activity) -> String {
     match &activity.kind {
         ActivityKind::Launched => tf(
@@ -294,6 +281,26 @@ fn activity_list(activity: &[Activity]) -> Element {
         .into_element()
 }
 
+/// A row that keeps its own state however the rows around it change: rows
+/// come and go with the sandbox, and a switch must not inherit another's
+fn keyed(key: &'static str, row: impl IntoElement) -> Element {
+    rect()
+        .key(key)
+        .width(Size::fill())
+        .child(row)
+        .into_element()
+}
+
+fn caption(text: &'static str) -> Element {
+    label()
+        .text(text)
+        .width(Size::fill())
+        .margin(Gaps::new(0., 2., 6., 2.))
+        .font_size(text_size(12.5))
+        .color(colors::fg_secondary())
+        .into_element()
+}
+
 fn save(mut settings: State<Option<InstanceSecurity>>, cluster_id: i64, next: InstanceSecurity) {
     settings.set(Some(next.clone()));
     spawn(async move {
@@ -522,6 +529,14 @@ fn overview(
         t("oneclient.cluster.security.overview.next")
     };
     let sandboxed = protection.is_some_and(Protection::is_sandboxed);
+    // what's missing from a partial launch, or why there's no sandbox
+    let detail = match protection {
+        Some(Protection::Partial(gaps)) => Some((gaps.join(" "), colors::code_warn())),
+        Some(Protection::Off(reason)) if !reason.is_empty() => {
+            Some((reason.clone(), colors::danger()))
+        }
+        _ => None,
+    };
 
     let kept: Vec<Element> = if sandboxed {
         [
@@ -565,6 +580,13 @@ fn overview(
         reach.push(reach_line(
             t("oneclient.cluster.security.overview.reach.localhost").to_string(),
         ));
+    }
+
+    // without the sandbox the list is everything
+    if !sandboxed {
+        reach = vec![reach_line(
+            t("oneclient.cluster.security.overview.reach.everything").to_string(),
+        )];
     }
 
     let latest = latest.map(|group| {
@@ -633,7 +655,15 @@ fn overview(
                                 .text(subtitle)
                                 .font_size(text_size(12.5))
                                 .color(colors::fg_secondary()),
-                        ),
+                        )
+                        .maybe_child(detail.map(|(text, color)| {
+                            label()
+                                .text(text)
+                                .margin(Gaps::new(4., 0., 0., 0.))
+                                .font_size(text_size(12.5))
+                                .color(color)
+                                .into_element()
+                        })),
                 ),
         )
         .child(
@@ -980,17 +1010,28 @@ impl Component for ClusterSecurity {
         });
 
         // ---- activity
-        let activity_row_header = settings_row(
-            IconType::Eye,
-            t("oneclient.cluster.security.activity.title"),
-            t("oneclient.cluster.security.activity.description"),
-            rect(),
-        );
         let groups = group_by_launch(&activity);
         // history from before launches were marked isn't one launch
         let latest = groups.first().filter(|group| group.launched.is_some());
         let overview = overview(shown.read().as_ref(), running, &current, latest);
         let suspects = suspects_card(&activity);
+
+        // only meaningful while the game is sandboxed
+        let sandbox_settings: Vec<Element> = if current.sandbox {
+            let mut rows = vec![
+                keyed("microphone", mic_row),
+                keyed("localhost", localhost_row),
+                keyed("folders", folders_row),
+            ];
+            rows.extend(grants.map(|grants| keyed("grants", grants)));
+            rows.extend(grant_error.map(|error| keyed("grant-error", error)));
+            rows
+        } else {
+            vec![keyed(
+                "sandbox-off-note",
+                caption(t("oneclient.cluster.security.sandbox.off_note")),
+            )]
+        };
 
         cluster_content()
             .child(
@@ -999,32 +1040,30 @@ impl Component for ClusterSecurity {
                     .height(Size::fill())
                     .scrollbar_gutter(true)
                     .spacing(4.)
-                    .child(overview)
-                    .append_children(suspects)
-                    .child(section_header(t(
-                        "oneclient.cluster.security.section.protection",
-                    )))
-                    .append_children(protection_card(protection.as_ref()))
-                    .child(sandbox_row)
-                    .child(mic_row)
-                    .child(localhost_row)
-                    .child(section_header(t(
-                        "oneclient.cluster.security.section.changes",
-                    )))
-                    .child(skin_row)
-                    .child(name_row)
-                    .child(cape_row)
-                    .child(section_header(t(
-                        "oneclient.cluster.security.section.folders",
-                    )))
-                    .child(folders_row)
-                    .append_children(grants)
-                    .append_children(grant_error)
-                    .child(section_header(t(
-                        "oneclient.cluster.security.section.activity",
-                    )))
-                    .child(activity_row_header)
-                    .child(activity_list(&activity)),
+                    .child(keyed("overview", overview))
+                    .append_children(suspects.map(|card| keyed("suspects", card)))
+                    .child(keyed(
+                        "sandbox-header",
+                        section_header(t("oneclient.cluster.security.section.protection")),
+                    ))
+                    .child(keyed("sandbox", sandbox_row))
+                    .append_children(sandbox_settings)
+                    .child(keyed(
+                        "changes-header",
+                        section_header(t("oneclient.cluster.security.section.changes")),
+                    ))
+                    .child(keyed("skin", skin_row))
+                    .child(keyed("name", name_row))
+                    .child(keyed("cape", cape_row))
+                    .child(keyed(
+                        "activity-header",
+                        section_header(t("oneclient.cluster.security.section.activity")),
+                    ))
+                    .child(keyed(
+                        "activity-caption",
+                        caption(t("oneclient.cluster.security.activity.description")),
+                    ))
+                    .child(keyed("activity", activity_list(&activity))),
             )
             .maybe_child(confirm_off)
             .into_element()
