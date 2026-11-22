@@ -3,13 +3,17 @@
 
 The jar is committed and embedded into the launcher with include_bytes!, so
 building the launcher never needs a JDK. Entries are sorted and timestamped
-1980-01-01 so the same sources always give the same bytes; CI rebuilds it and
-fails if the committed jar is stale (`python build.py --check`).
+1980-01-01 so the same sources always give the same classes; CI rebuilds it
+and fails if the committed jar is stale (`python build.py --check`).
 
-Needs a JDK 11+ (it targets Java 8 bytecode with --release 8).
+Needs JDK 25 (it targets Java 8 bytecode with --release 8): other javac
+versions compile the same sources to slightly different classes. The check
+compares what is in the jar, not its bytes, since Python's zlib compresses
+differently from one platform to the next.
 """
 
 import argparse
+import io
 import pathlib
 import shutil
 import subprocess
@@ -21,6 +25,8 @@ HERE = pathlib.Path(__file__).resolve().parent
 SRC = HERE / "src"
 SRC11 = HERE / "src11"
 JAR = HERE / "oneclient-agent.jar"
+# the JDK the committed jar is built with; CI's check uses the same
+JDK_MAJOR = 25
 
 MANIFEST = (
     "Manifest-Version: 1.0\r\n"
@@ -67,6 +73,20 @@ def build() -> bytes:
         return jar_path.read_bytes()
 
 
+def javac_major() -> int | None:
+    out = subprocess.run(["javac", "-version"], capture_output=True, text=True)
+    words = (out.stdout or out.stderr).split()
+    try:
+        return int(words[1].split(".")[0])
+    except (IndexError, ValueError):
+        return None
+
+
+def entries(jar: bytes) -> list[tuple[str, bytes]]:
+    with zipfile.ZipFile(io.BytesIO(jar)) as archive:
+        return [(name, archive.read(name)) for name in archive.namelist()]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true", help="fail if the committed jar is stale")
@@ -76,9 +96,14 @@ def main() -> int:
         print("javac not found; install a JDK 11 or newer", file=sys.stderr)
         return 2
 
+    major = javac_major()
+    if major != JDK_MAJOR:
+        print(f"javac {major} found; build the agent with JDK {JDK_MAJOR}, as CI does", file=sys.stderr)
+        return 2
+
     built = build()
     if args.check:
-        if not JAR.exists() or JAR.read_bytes() != built:
+        if not JAR.exists() or entries(JAR.read_bytes()) != entries(built):
             print("oneclient-agent.jar is out of date; run agent/build.py", file=sys.stderr)
             return 1
         print("oneclient-agent.jar is up to date")

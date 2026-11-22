@@ -21,10 +21,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      # build.py's JDK_MAJOR: other versions compile slightly different classes
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '25'
 
       - name: Rebuild and compare
         run: python3 packages/oneclient_broker/agent/build.py --check
