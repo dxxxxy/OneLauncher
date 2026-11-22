@@ -274,6 +274,8 @@ impl Plan {
                 ],
             );
             push(&mut args, &["--dev-bind-try", "/dev/dri", "/dev/dri"]);
+            // WSL's GPU: without it Mesa falls back to drawing on the CPU
+            push(&mut args, &["--dev-bind-try", "/dev/dxg", "/dev/dxg"]);
             if let Ok(entries) = std::fs::read_dir("/dev") {
                 for entry in entries.flatten() {
                     let name = entry.file_name();
