@@ -43,6 +43,18 @@ const AUDIO_GAP: &str =
     "Game audio goes through your sound server, which can't keep the microphone out on Linux";
 const X11_GAP: &str = "X11 lets any window read the keyboard and screen of others; use a Wayland session for full protection";
 const NO_BWRAP_GAP: &str = "bubblewrap isn't available, so the game can still reach the keyring and other apps through D-Bus; install bubblewrap for full protection";
+const BWRAP_BLOCKED_GAP: &str = "Your system blocks bubblewrap (on Ubuntu 23.10 and later, AppArmor does), so the game can still reach the keyring and other apps through D-Bus; allow bubblewrap in AppArmor for full protection";
+
+/// Why there's no bubblewrap: not installed, or installed but stopped
+fn no_bwrap_gap() -> String {
+    let installed = bwrap_candidates().iter().any(|path| path.is_file());
+    if installed {
+        BWRAP_BLOCKED_GAP
+    } else {
+        NO_BWRAP_GAP
+    }
+    .into()
+}
 
 /// `flatpak-spawn`, when this is OneClient's Flatpak and the portal will
 /// start a sub-sandbox
@@ -85,7 +97,7 @@ pub(crate) fn expected(microphone: bool) -> Protection {
         };
     }
     if bwrap().is_none() {
-        return Protection::Partial(vec![NO_BWRAP_GAP.into()]);
+        return Protection::Partial(vec![no_bwrap_gap()]);
     }
     let mut gaps = Vec::new();
     if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
@@ -105,18 +117,24 @@ pub(crate) fn expected(microphone: bool) -> Protection {
     }
 }
 
+fn bwrap_candidates() -> Vec<PathBuf> {
+    [
+        std::env::var_os("ONECLIENT_BWRAP").map(PathBuf::from),
+        std::env::var_os("APPDIR").map(|d| PathBuf::from(d).join("usr/bin/bwrap")),
+        Some(PathBuf::from("/usr/bin/bwrap")),
+        Some(PathBuf::from("/usr/local/bin/bwrap")),
+        Some(PathBuf::from("/run/current-system/sw/bin/bwrap")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 fn bwrap() -> Option<&'static PathBuf> {
     static FOUND: OnceLock<Option<PathBuf>> = OnceLock::new();
     FOUND
         .get_or_init(|| {
-            let candidates = [
-                std::env::var_os("ONECLIENT_BWRAP").map(PathBuf::from),
-                std::env::var_os("APPDIR").map(|d| PathBuf::from(d).join("usr/bin/bwrap")),
-                Some(PathBuf::from("/usr/bin/bwrap")),
-                Some(PathBuf::from("/usr/local/bin/bwrap")),
-                Some(PathBuf::from("/run/current-system/sw/bin/bwrap")),
-            ];
-            candidates.into_iter().flatten().find(|path| {
+            bwrap_candidates().into_iter().find(|path| {
                 // installed is not enough: user namespaces may be blocked
                 // (Ubuntu 24.04 AppArmor, hardened kernels)
                 path.is_file()
@@ -357,7 +375,7 @@ impl Plan {
         Ok(Self::Landlock {
             read,
             write,
-            gaps: vec![NO_BWRAP_GAP.into()],
+            gaps: vec![no_bwrap_gap()],
         })
     }
 
