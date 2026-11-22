@@ -14,7 +14,9 @@ pub struct InstanceSecurity {
     pub microphone: Option<bool>,
     pub localhost: bool,
     pub grants: Vec<FolderGrant>,
-    /// What mods may change on the Minecraft profile without asking
+    /// What mods may change on the Minecraft profile without asking. Names
+    /// are refused by default: one rename can't be undone for 30 days and
+    /// frees the old name for anyone to take
     pub skin_changes: ChangeRule,
     pub name_changes: ChangeRule,
     pub cape_changes: ChangeRule,
@@ -28,7 +30,7 @@ impl Default for InstanceSecurity {
             localhost: false,
             grants: Vec::new(),
             skin_changes: ChangeRule::Allow,
-            name_changes: ChangeRule::Allow,
+            name_changes: ChangeRule::Deny,
             cape_changes: ChangeRule::Allow,
         }
     }
@@ -113,13 +115,15 @@ mod tests {
     }
 
     #[test]
-    fn profile_changes_are_allowed_unless_chosen_otherwise() {
+    fn names_are_refused_and_other_profile_changes_allowed_by_default() {
         let mut security: InstanceSecurity = serde_json::from_str(r#"{"sandbox":true}"#).unwrap();
         assert_eq!(security.change_rule(ChangeKind::Cape), ChangeRule::Allow);
+        assert_eq!(security.change_rule(ChangeKind::Skin), ChangeRule::Allow);
+        assert_eq!(security.change_rule(ChangeKind::Name), ChangeRule::Deny);
         assert_eq!(security.change_rule(ChangeKind::Purchases), ChangeRule::Ask);
-        security.name_changes = ChangeRule::Deny;
+        security.name_changes = ChangeRule::Ask;
         let saved: InstanceSecurity =
             serde_json::from_str(&serde_json::to_string(&security).unwrap()).unwrap();
-        assert_eq!(saved.change_rule(ChangeKind::Name), ChangeRule::Deny);
+        assert_eq!(saved.change_rule(ChangeKind::Name), ChangeRule::Ask);
     }
 }
