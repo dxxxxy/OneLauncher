@@ -226,6 +226,17 @@ mod tests {
         }
     }
 
+    impl TestHost {
+        fn alarm_count(&self) -> usize {
+            self.log
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|a| a.is_alarm())
+                .count()
+        }
+    }
+
     fn shared(host: Arc<TestHost>) -> Arc<Shared> {
         Shared::new(
             SessionConfig {
@@ -356,8 +367,13 @@ mod tests {
 
     #[tokio::test]
     async fn the_game_can_only_switch_to_the_users_own_accounts() {
-        struct Accounts(Mutex<Vec<Uuid>>);
+        struct Accounts(Mutex<Vec<Uuid>>, Mutex<Vec<String>>, bool);
         impl BrokerHost for Accounts {
+            fn confirm(&self, prompt: ConfirmPrompt) -> BoxFuture<'_, bool> {
+                self.1.lock().unwrap().push(prompt.title);
+                let answer = self.2;
+                Box::pin(async move { answer })
+            }
             fn real_token(&self, account: Uuid) -> BoxFuture<'_, Result<String, String>> {
                 Box::pin(async move { Ok(format!("REAL-{account}")) })
             }
@@ -379,31 +395,50 @@ mod tests {
                 Box::pin(async { Ok(()) })
             }
         }
-        let host = Arc::new(Accounts(Mutex::new(vec![])));
-        let shared = Shared::new(
-            SessionConfig {
-                cluster_id: 1,
-                account: Uuid::from_u128(1),
-                key: "KEY".into(),
-                fake_token: "FAKE".into(),
-                open_roots: vec![],
-                http: reqwest::Client::new(),
-            },
-            host.clone(),
-        );
-        let switch = |id: u128| Request::SwitchAccount {
-            account: Uuid::from_u128(id).to_string(),
-            caller: String::new(),
-        };
+        for agrees in [false, true] {
+            let host = Arc::new(Accounts(Mutex::new(vec![]), Mutex::new(vec![]), agrees));
+            let shared = Shared::new(
+                SessionConfig {
+                    cluster_id: 1,
+                    account: Uuid::from_u128(1),
+                    key: "KEY".into(),
+                    fake_token: "FAKE".into(),
+                    open_roots: vec![],
+                    http: reqwest::Client::new(),
+                },
+                host.clone(),
+            );
+            let switch = |id: u128| Request::SwitchAccount {
+                account: Uuid::from_u128(id).to_string(),
+                caller: String::new(),
+            };
 
-        assert!(matches!(
-            session::handle(&shared, switch(9)).await,
-            Reply::Error(_)
-        ));
-        assert_eq!(shared.account(), Uuid::from_u128(1));
-        assert_eq!(session::handle(&shared, switch(2)).await, Reply::Ok);
-        assert_eq!(shared.account(), Uuid::from_u128(2));
-        assert_eq!(host.0.lock().unwrap().as_slice(), &[Uuid::from_u128(2)]);
+            assert!(matches!(
+                session::handle(&shared, switch(9)).await,
+                Reply::Error(_)
+            ));
+            assert_eq!(shared.account(), Uuid::from_u128(1));
+            assert!(
+                host.1.lock().unwrap().is_empty(),
+                "nobody is asked about strangers"
+            );
+
+            // the user is asked first, and the game only switches if they agree
+            let reply = session::handle(&shared, switch(2)).await;
+            assert_eq!(
+                host.1.lock().unwrap().as_slice(),
+                &["Switch the game to Alt?".to_string()]
+            );
+            if agrees {
+                assert_eq!(reply, Reply::Ok);
+                assert_eq!(shared.account(), Uuid::from_u128(2));
+                assert_eq!(host.0.lock().unwrap().as_slice(), &[Uuid::from_u128(2)]);
+            } else {
+                assert!(matches!(reply, Reply::Error(_)), "{reply:?}");
+                assert_eq!(shared.account(), Uuid::from_u128(1));
+                assert!(host.0.lock().unwrap().is_empty());
+            }
+        }
     }
 
     #[tokio::test]
@@ -412,7 +447,8 @@ mod tests {
             (ChangeRule::Allow, false, true, 0),
             (ChangeRule::Deny, true, false, 0),
             (ChangeRule::Ask, true, true, 2),
-            (ChangeRule::Ask, false, false, 2),
+            // a no holds for a while, so a mod retrying isn't asked about
+            (ChangeRule::Ask, false, false, 1),
         ] {
             let host = Arc::new(TestHost {
                 answer,
@@ -420,7 +456,7 @@ mod tests {
                 ..Default::default()
             });
             let shared = shared(host.clone());
-            // an answer covers that one change only
+            // a yes covers that one change only
             for _ in 0..2 {
                 let permitted = shared
                     .permit_for_test("PUT", "/minecraft/profile/capes/active")
@@ -429,6 +465,68 @@ mod tests {
             }
             assert_eq!(host.asked.lock().unwrap().len(), asked, "{rule:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_mod_that_keeps_asking_is_stopped_and_reported() {
+        let host = Arc::new(TestHost::default());
+        let shared = shared(host.clone());
+        let ask = || shared.permit_for_test("GET", "/productvoucher/X");
+        for _ in 0..10 {
+            assert!(ask().await.is_err());
+        }
+        // asked once, then held: a burst can't bury the user in questions
+        assert_eq!(host.asked.lock().unwrap().len(), 1);
+        assert_eq!(host.alarm_count(), 0);
+
+        // after the hold, asked again; the third no stops it for the launch
+        for _ in 0..2 {
+            shared.expire_refusals_for_test();
+            assert!(ask().await.is_err());
+        }
+        assert_eq!(host.asked.lock().unwrap().len(), 3);
+        assert_eq!(host.alarm_count(), 1);
+        shared.expire_refusals_for_test();
+        assert!(ask().await.unwrap_err().contains("several times"));
+        assert_eq!(host.asked.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_refused_request_in_a_loop_is_reported_once() {
+        let host = Arc::new(TestHost::default());
+        let shared = shared(host.clone());
+        for _ in 0..50 {
+            let reply = session::handle(
+                &shared,
+                Request::Http {
+                    method: "POST".into(),
+                    url: "https://authserver.mojang.com/authenticate".into(),
+                    headers: vec![],
+                    body: vec![],
+                    caller: String::new(),
+                },
+            )
+            .await;
+            assert!(matches!(reply, Reply::Http { status: 403, .. }));
+        }
+        assert_eq!(host.log.lock().unwrap().len(), 1);
+        assert_eq!(host.alarm_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_name_change_the_rules_refuse_is_recorded_as_refused() {
+        let host = Arc::new(TestHost {
+            rule: Some(ChangeRule::Deny),
+            ..Default::default()
+        });
+        let reply = session::handle(&shared(host.clone()), rename()).await;
+        assert!(matches!(reply, Reply::Http { status: 403, .. }));
+        assert!(host.asked.lock().unwrap().is_empty());
+        let log = host.log.lock().unwrap();
+        assert!(
+            matches!(&log[0].kind, ActivityKind::Refused { what, .. } if what.contains("name to Taken")),
+            "{log:?}"
+        );
     }
 
     #[tokio::test]

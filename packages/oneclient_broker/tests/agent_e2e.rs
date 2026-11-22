@@ -59,9 +59,12 @@ impl BrokerHost for Host {
         })
     }
 
+    /// Agrees to switching accounts and opening links, refuses every
+    /// account change
     fn confirm(&self, prompt: ConfirmPrompt) -> BoxFuture<'_, bool> {
+        let yes = prompt.title.starts_with("Switch ") || prompt.title.starts_with("Open ");
         self.asked.lock().unwrap().push(prompt.title);
-        Box::pin(async { false })
+        Box::pin(async move { yes })
     }
 
     fn switch_account(&self, to: Uuid) -> BoxFuture<'_, Result<(), String>> {
@@ -350,15 +353,16 @@ async fn the_agent_routes_account_requests_through_the_broker() {
             .any(|a| matches!(a.kind, ActivityKind::Connected { .. })),
         "{log:?}"
     );
-    // account changes ask the user; this host says no to all three
+    // account changes ask the user; this host says no, and the second
+    // rename, right after the first no, isn't asked again
     assert_eq!(log.iter().filter(|a| a.is_alarm()).count(), 0, "{log:?}");
-    assert_eq!(
+    let refused = |prefix: &str| {
         log.iter()
-            .filter(|a| matches!(&a.kind, ActivityKind::Denied { reason, .. } if reason.starts_with("you didn't let")))
-            .count(),
-        3,
-        "{log:?}"
-    );
+            .filter(|a| matches!(&a.kind, ActivityKind::Denied { reason, .. } if reason.starts_with(prefix)))
+            .count()
+    };
+    assert_eq!(refused("you didn't let"), 2, "{log:?}");
+    assert_eq!(refused("you just refused"), 1, "{log:?}");
     #[cfg(windows)]
     assert_eq!(&discord.await.unwrap(), b"hello");
     assert_eq!(

@@ -56,11 +56,21 @@ pub enum ActivityKind {
         reason: String,
         caller: String,
     },
-    /// An account change the user agreed to in the launcher
+    /// An account change that went through: the user agreed in the launcher
+    /// (`asked`), or their rule for it allows it without asking
     Allowed {
         method: String,
         url: String,
         /// "change your cape"
+        what: String,
+        caller: String,
+        #[serde(default)]
+        asked: bool,
+    },
+    /// An account change the user's rule for it refuses
+    Refused {
+        method: String,
+        url: String,
         what: String,
         caller: String,
     },

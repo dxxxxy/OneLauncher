@@ -67,6 +67,10 @@ fn describe(activity: &Activity) -> String {
             "oneclient.cluster.security.activity.allowed",
             &[what, caller],
         ),
+        ActivityKind::Refused { what, caller, .. } => tf(
+            "oneclient.cluster.security.activity.refused",
+            &[what, caller],
+        ),
         ActivityKind::Opened { target, .. } => {
             tf("oneclient.cluster.security.activity.opened", &[target])
         }
@@ -381,6 +385,7 @@ fn launch_stats(group: &LaunchGroup<'_>) -> LaunchStats {
     for entry in &group.entries {
         match entry.kind {
             ActivityKind::Denied { .. }
+            | ActivityKind::Refused { .. }
             | ActivityKind::Alarm { .. }
             | ActivityKind::SensitiveAccess { .. }
             | ActivityKind::OpenRefused { .. }
@@ -1203,6 +1208,7 @@ mod tests {
                 url: "u".into(),
                 what: "change your cape".into(),
                 caller: "c".into(),
+                asked: true,
             }),
         ];
         log.reverse();

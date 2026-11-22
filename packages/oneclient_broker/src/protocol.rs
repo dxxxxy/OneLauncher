@@ -26,6 +26,25 @@ pub const MAX_FRAME: u32 = 8 * 1024 * 1024;
 
 pub type Headers = Vec<(String, String)>;
 
+impl Request {
+    /// The caller the game named, if the request has one
+    pub fn caller_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Self::Hello { .. } => None,
+            Self::Http { caller, .. }
+            | Self::Open { caller, .. }
+            | Self::Pick { caller, .. }
+            | Self::Import { caller, .. }
+            | Self::Accounts { caller }
+            | Self::SwitchAccount { caller, .. }
+            | Self::AddAccount { caller }
+            | Self::Trash { caller, .. }
+            | Self::Reveal { caller, .. }
+            | Self::WatchDownloads { caller, .. } => Some(caller),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
     /// First frame on a connection; anything else first closes it
