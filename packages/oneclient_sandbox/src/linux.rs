@@ -131,6 +131,13 @@ fn bwrap() -> Option<&'static PathBuf> {
         .as_ref()
 }
 
+/// Where `/etc/resolv.conf` really is, when that's somewhere the sandbox
+/// doesn't already show
+fn resolver_file() -> Option<PathBuf> {
+    let target = std::fs::canonicalize("/etc/resolv.conf").ok()?;
+    (!target.starts_with("/etc")).then_some(target)
+}
+
 fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
@@ -148,6 +155,12 @@ fn bind(args: &mut Vec<OsString>, kind: &str, path: &Path) {
 
 impl Plan {
     pub(crate) async fn build(policy: &SandboxPolicy) -> SandboxResult<Self> {
+        Self::build_with(policy, true).await
+    }
+
+    /// `use_bwrap` false builds the Landlock fallback even where bubblewrap
+    /// is installed, so tests can check it
+    pub(crate) async fn build_with(policy: &SandboxPolicy, use_bwrap: bool) -> SandboxResult<Self> {
         if std::env::var_os("FLATPAK_ID").is_some() {
             let Some(program) = flatpak_spawn() else {
                 return Ok(Self::Off(FLATPAK_OFF.into()));
@@ -187,7 +200,7 @@ impl Plan {
         let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
         let x11 = x11();
 
-        if let Some(program) = bwrap() {
+        if let Some(program) = bwrap().filter(|_| use_bwrap) {
             let mut args: Vec<OsString> = Vec::new();
             push(&mut args, &["--ro-bind", "/usr", "/usr"]);
             for dir in [
@@ -228,6 +241,11 @@ impl Plan {
                 "/run/current-system",
             ] {
                 push(&mut args, &["--ro-bind-try", dir, dir]);
+            }
+            // DNS: /etc/resolv.conf is often a link, on WSL into /mnt/wsl,
+            // and a game that can't resolve names can't play online
+            if let Some(resolver) = resolver_file() {
+                bind(&mut args, "--ro-bind-try", &resolver);
             }
             if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
                 let home = canonical(&home);
@@ -283,7 +301,18 @@ impl Plan {
             }
             push(
                 &mut args,
-                &["--unshare-ipc", "--unshare-cgroup-try", "--cap-drop", "ALL"],
+                // its own process list: other programs' command lines can
+                // hold secrets, and nothing in a game needs to see them
+                &[
+                    "--unshare-ipc",
+                    "--unshare-pid",
+                    // the PID the launcher holds is bwrap's: killing it must
+                    // take the game with it, or a stopped game plays on
+                    "--die-with-parent",
+                    "--unshare-cgroup-try",
+                    "--cap-drop",
+                    "ALL",
+                ],
             );
             if policy.offline {
                 push(&mut args, &["--unshare-net"]);
@@ -321,6 +350,7 @@ impl Plan {
         if let Some(auth) = std::env::var_os("XAUTHORITY") {
             read.push(PathBuf::from(auth));
         }
+        read.extend(resolver_file());
         let mut write = write;
         write.push(PathBuf::from("/dev"));
 

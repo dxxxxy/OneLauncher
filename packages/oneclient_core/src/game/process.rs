@@ -39,6 +39,15 @@ pub fn is_process_alive(pid: u32, started_at: Option<u64>) -> bool {
 /// For games re-adopted after a launcher restart where no `Child` handle
 /// survives to kill through
 pub fn kill_process(pid: u32) -> bool {
+    // the game was started in its own process group; under bubblewrap the
+    // PID is bwrap's, which doesn't pass signals on, so ask the whole group
+    #[cfg(target_os = "linux")]
+    if probe(pid).is_some() {
+        // SAFETY: plain kill(2) on the group the game was started in
+        if unsafe { libc::kill(-(pid as i32), libc::SIGTERM) } == 0 {
+            return true;
+        }
+    }
     let Some((sys, pid)) = probe(pid) else {
         return false;
     };
