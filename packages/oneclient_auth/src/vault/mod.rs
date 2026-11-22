@@ -3,7 +3,8 @@
 //!
 //! - Windows: a DPAPI blob bound to the user's logon (`auth.vault`)
 //! - macOS: a Keychain item bound to the app's signature
-//! - Linux: the Secret Service (GNOME Keyring, KWallet)
+//! - Linux: split between the Secret Service (GNOME Keyring, KWallet) and a
+//!   file, so a game that reaches the session bus gets nothing (see `split`)
 //!
 //! When the OS store can't be reached, secrets go to a 0600 fallback file so a
 //! locked keyring never signs anyone out and never wipes good tokens. The next
@@ -25,6 +26,9 @@ use crate::error::{AuthError, AuthResult};
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod keyring_store;
+// used on Linux, tested everywhere
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod split;
 #[cfg(windows)]
 mod windows;
 
@@ -76,6 +80,10 @@ pub trait SecretBackend: Send + Sync {
     /// `Ok(None)` when nothing was ever stored
     fn load(&self) -> AuthResult<Option<Vec<u8>>>;
     fn store(&self, data: &[u8]) -> AuthResult<()>;
+    /// What was loaded is in an older form the next save replaces
+    fn needs_migration(&self) -> bool {
+        false
+    }
 }
 
 pub struct Vault {
@@ -115,7 +123,14 @@ impl Vault {
         if let Some(primary) = &self.primary {
             match run_blocking(primary.clone(), |b| b.load()).await {
                 Ok(Some(bytes)) => match decode(&bytes) {
-                    Ok(stored) => secrets.extend(stored),
+                    Ok(stored) => {
+                        secrets.extend(stored);
+                        if primary.needs_migration()
+                            && let Err(err) = self.save(&secrets).await
+                        {
+                            tracing::warn!("could not move secrets to their new form: {err}");
+                        }
+                    }
                     Err(err) => {
                         tracing::warn!("{} holds unreadable secrets: {err}", primary.name());
                         self.primary_unreadable = true;
@@ -194,9 +209,17 @@ fn platform_backend(config_dir: &Path) -> Option<Arc<dyn SecretBackend>> {
     )))
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(target_os = "macos")]
 fn platform_backend(_config_dir: &Path) -> Option<Arc<dyn SecretBackend>> {
     Some(Arc::new(keyring_store::KeyringItem::new()))
+}
+
+#[cfg(target_os = "linux")]
+fn platform_backend(config_dir: &Path) -> Option<Arc<dyn SecretBackend>> {
+    Some(Arc::new(split::SplitStore::new(
+        Arc::new(keyring_store::KeyringItem::new()),
+        config_dir.to_path_buf(),
+    )))
 }
 
 #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
