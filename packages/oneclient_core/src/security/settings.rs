@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use oneclient_broker::{ChangeKind, ChangeRule};
 use serde::{Deserialize, Serialize};
 
 /// Per-instance security choices. Stored in the launcher's data folder, never
@@ -13,6 +14,10 @@ pub struct InstanceSecurity {
     pub microphone: Option<bool>,
     pub localhost: bool,
     pub grants: Vec<FolderGrant>,
+    /// What mods may change on the Minecraft profile without asking
+    pub skin_changes: ChangeRule,
+    pub name_changes: ChangeRule,
+    pub cape_changes: ChangeRule,
 }
 
 impl Default for InstanceSecurity {
@@ -22,6 +27,9 @@ impl Default for InstanceSecurity {
             microphone: None,
             localhost: false,
             grants: Vec::new(),
+            skin_changes: ChangeRule::Allow,
+            name_changes: ChangeRule::Allow,
+            cape_changes: ChangeRule::Allow,
         }
     }
 }
@@ -58,6 +66,17 @@ impl InstanceSecurity {
             .map_err(|e| e.to_string())
     }
 
+    /// The rule for an account change. The rest (purchases, codes, account
+    /// settings) has no setting and always asks
+    pub fn change_rule(&self, kind: ChangeKind) -> ChangeRule {
+        match kind {
+            ChangeKind::Skin => self.skin_changes,
+            ChangeKind::Name => self.name_changes,
+            ChangeKind::Cape => self.cape_changes,
+            _ => ChangeRule::Ask,
+        }
+    }
+
     /// Adds a folder unless it is one rats go after
     pub fn grant(&mut self, path: PathBuf, write: bool) -> Result<(), &'static str> {
         if let Some(reason) = oneclient_sandbox::sensitive_reason(&path) {
@@ -91,5 +110,16 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(security.grants.len(), 1);
+    }
+
+    #[test]
+    fn profile_changes_are_allowed_unless_chosen_otherwise() {
+        let mut security: InstanceSecurity = serde_json::from_str(r#"{"sandbox":true}"#).unwrap();
+        assert_eq!(security.change_rule(ChangeKind::Cape), ChangeRule::Allow);
+        assert_eq!(security.change_rule(ChangeKind::Purchases), ChangeRule::Ask);
+        security.name_changes = ChangeRule::Deny;
+        let saved: InstanceSecurity =
+            serde_json::from_str(&serde_json::to_string(&security).unwrap()).unwrap();
+        assert_eq!(saved.change_rule(ChangeKind::Name), ChangeRule::Deny);
     }
 }

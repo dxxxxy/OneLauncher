@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use oneclient_auth::AuthService;
 use oneclient_broker::{
-    Activity, ActivityKind, BoxFuture, BrokerHost, ConfirmPrompt, GameAccount, OpenTarget,
-    PickMode, PickRequest, WantedDownload,
+    Activity, ActivityKind, BoxFuture, BrokerHost, ChangeKind, ChangeRule, ConfirmPrompt,
+    GameAccount, OpenTarget, PickMode, PickRequest, WantedDownload,
 };
 use oneclient_events::EventBus;
 use uuid::Uuid;
@@ -230,6 +230,15 @@ impl BrokerHost for LauncherBrokerHost {
             tokio::time::timeout(CONFIRM_TIMEOUT, ui.confirm(prompt))
                 .await
                 .unwrap_or(false)
+        })
+    }
+
+    fn change_rule(&self, kind: ChangeKind) -> BoxFuture<'_, ChangeRule> {
+        // read each time: a change in the launcher applies to the running game
+        Box::pin(async move {
+            super::InstanceSecurity::load(self.cluster_id)
+                .await
+                .change_rule(kind)
         })
     }
 
