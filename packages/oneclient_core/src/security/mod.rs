@@ -174,6 +174,11 @@ impl SecurityService {
         self.changes.subscribe()
     }
 
+    /// An instance's security settings were saved: what's shown follows
+    pub fn settings_changed(&self) {
+        self.changed();
+    }
+
     fn changed(&self) {
         self.changes.send_modify(|n| *n = n.wrapping_add(1));
     }
@@ -421,7 +426,17 @@ pub async fn shown_protection(
     {
         return live;
     }
-    let settings = InstanceSecurity::load(cluster_id).await;
+    predicted_protection(&InstanceSecurity::load(cluster_id).await, folder_name).await
+}
+
+/// What the next launch with `settings` will get. Takes the settings rather
+/// than reading them so a view that just changed one shows the result before
+/// the file is written
+pub async fn predicted_protection(
+    settings: &InstanceSecurity,
+    folder_name: &str,
+) -> oneclient_sandbox::Protection {
+    let (sandbox, localhost) = (settings.sandbox, settings.localhost);
     let microphone = match settings.microphone {
         Some(choice) => choice,
         None => match paths::cluster_mods_dir(folder_name) {
@@ -431,7 +446,7 @@ pub async fn shown_protection(
     };
     // finding bubblewrap runs it once
     tokio::task::spawn_blocking(move || {
-        oneclient_sandbox::expected_protection(settings.sandbox, settings.localhost, microphone)
+        oneclient_sandbox::expected_protection(sandbox, localhost, microphone)
     })
     .await
     .unwrap_or_else(|_| oneclient_sandbox::Protection::Off(String::new()))
