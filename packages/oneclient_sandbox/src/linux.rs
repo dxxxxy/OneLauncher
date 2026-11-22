@@ -7,7 +7,7 @@
 //! file access without namespaces but can't hide sockets, so it is reported
 //! as partial protection.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -100,12 +100,8 @@ pub(crate) fn expected(microphone: bool) -> Protection {
         return Protection::Partial(vec![no_bwrap_gap()]);
     }
     let mut gaps = Vec::new();
-    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
-        let sound =
-            runtime_dir.join("pulse/native").exists() || runtime_dir.join("pipewire-0").exists();
-        if sound && !microphone {
-            gaps.push(AUDIO_GAP.into());
-        }
+    if !sound_sockets().is_empty() && !microphone {
+        gaps.push(AUDIO_GAP.into());
     }
     if x11() {
         gaps.push(X11_GAP.into());
@@ -169,6 +165,45 @@ fn bind(args: &mut Vec<OsString>, kind: &str, path: &Path) {
     args.push(kind.into());
     args.push(path.clone().into());
     args.push(path.into());
+}
+
+/// A socket programs find by name, such as `$XDG_RUNTIME_DIR/wayland-0`:
+/// bound from wherever it really is to that name. The name can be a link
+/// (WSLg links `wayland-0` into /mnt/wslg) the sandbox doesn't carry over,
+/// so binding only the target leaves the game without a display
+fn bind_named(args: &mut Vec<OsString>, kind: &str, path: &Path) {
+    args.push(kind.into());
+    args.push(canonical(path).into());
+    args.push(path.into());
+}
+
+fn sound_sockets() -> Vec<PathBuf> {
+    sound_sockets_in(
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .as_deref()
+            .map(Path::new),
+        std::env::var_os("PULSE_SERVER").as_deref(),
+    )
+}
+
+/// The sound server's sockets: the usual ones in the runtime dir, and the
+/// one `PULSE_SERVER` names (WSLg keeps it in /mnt/wslg)
+fn sound_sockets_in(runtime_dir: Option<&Path>, pulse_server: Option<&OsStr>) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = runtime_dir
+        .into_iter()
+        .flat_map(|dir| [dir.join("pulse/native"), dir.join("pipewire-0")])
+        .collect();
+    if let Some(server) = pulse_server.and_then(OsStr::to_str) {
+        found.extend(
+            server
+                .split_whitespace()
+                .filter_map(|entry| entry.strip_prefix("unix:"))
+                .map(PathBuf::from),
+        );
+    }
+    found.retain(|path| path.exists());
+    found.dedup();
+    found
 }
 
 impl Plan {
@@ -288,17 +323,15 @@ impl Plan {
                     args.push(runtime_dir.join("discord-ipc-0").into());
                 }
                 if let Some(wayland) = std::env::var_os("WAYLAND_DISPLAY") {
-                    bind(&mut args, "--ro-bind-try", &runtime_dir.join(wayland));
+                    bind_named(&mut args, "--ro-bind-try", &runtime_dir.join(wayland));
                 }
-                let pulse = runtime_dir.join("pulse/native");
-                let pipewire = runtime_dir.join("pipewire-0");
-                if pulse.exists() || pipewire.exists() {
-                    bind(&mut args, "--ro-bind-try", &pulse);
-                    bind(&mut args, "--ro-bind-try", &pipewire);
-                    if !policy.microphone {
-                        gaps.push(AUDIO_GAP.into());
-                    }
-                }
+            }
+            let sound = sound_sockets();
+            for socket in &sound {
+                bind_named(&mut args, "--ro-bind-try", socket);
+            }
+            if !sound.is_empty() && !policy.microphone {
+                gaps.push(AUDIO_GAP.into());
             }
             if x11 {
                 push(
@@ -454,4 +487,60 @@ fn landlock_ruleset(
         .create()?
         .add_rules(path_beneath_rules(read, AccessFs::from_read(abi)))?
         .add_rules(path_beneath_rules(write, AccessFs::from_all(abi)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("oneclient-linux-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_linked_socket_keeps_its_name_in_the_sandbox() {
+        let dir = scratch("named");
+        let real = dir.join("wslg").join("wayland-0");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, b"").unwrap();
+        let runtime = dir.join("runtime");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::os::unix::fs::symlink(&real, runtime.join("wayland-0")).unwrap();
+
+        let mut args = Vec::new();
+        bind_named(&mut args, "--ro-bind-try", &runtime.join("wayland-0"));
+        assert_eq!(
+            args,
+            [
+                OsString::from("--ro-bind-try"),
+                canonical(&real).into(),
+                runtime.join("wayland-0").into(),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sound_comes_from_the_runtime_dir_and_pulse_server() {
+        let dir = scratch("sound");
+        let runtime = dir.join("runtime");
+        std::fs::create_dir_all(runtime.join("pulse")).unwrap();
+        std::fs::write(runtime.join("pulse/native"), b"").unwrap();
+        let wslg = dir.join("PulseServer");
+        std::fs::write(&wslg, b"").unwrap();
+
+        let server = OsString::from(format!("unix:{} tcp:localhost", wslg.display()));
+        assert_eq!(
+            sound_sockets_in(Some(&runtime), Some(&server)),
+            [runtime.join("pulse/native"), wslg.clone()]
+        );
+        // a server that isn't there is left out
+        let gone = OsString::from("unix:/nonexistent/pulse");
+        assert!(sound_sockets_in(None, Some(&gone)).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
