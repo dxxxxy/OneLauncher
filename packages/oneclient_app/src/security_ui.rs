@@ -9,6 +9,12 @@ use oneclient_core::security::SecurityUi;
 
 pub struct AppSecurityUi;
 
+/// The broker calls in from its own threads, and the window can only be
+/// touched from the UI thread: hand the focus to the loop that runs there
+fn focus() {
+    crate::ipc::send(crate::ipc::IpcCommand::Focus);
+}
+
 impl SecurityUi for AppSecurityUi {
     fn open_url(&self, url: &str) {
         crate::platform::open_url(url);
@@ -34,7 +40,7 @@ impl SecurityUi for AppSecurityUi {
                     dialog = dialog.add_filter(&filter.name, &filter.extensions);
                 }
             }
-            crate::platform::focus_window();
+            focus();
             let handle = match request.mode {
                 PickMode::OpenFile => dialog.pick_file().await,
                 PickMode::OpenFolder => dialog.pick_folder().await,
@@ -45,7 +51,7 @@ impl SecurityUi for AppSecurityUi {
     }
 
     fn focus(&self) {
-        crate::platform::focus_window();
+        focus();
     }
 
     fn reveal(&self, file: &Path) {
@@ -54,7 +60,7 @@ impl SecurityUi for AppSecurityUi {
 
     fn confirm(&self, prompt: ConfirmPrompt) -> BoxFuture<'_, bool> {
         Box::pin(async move {
-            crate::platform::focus_window();
+            focus();
             let deny = "Don't allow".to_string();
             let answer = rfd::AsyncMessageDialog::new()
                 .set_level(rfd::MessageLevel::Warning)
