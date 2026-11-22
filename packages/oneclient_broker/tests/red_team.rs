@@ -3,8 +3,8 @@
 //! agent. Requests the policy lets through go to a capturing proxy, so a test
 //! sees exactly what would have reached the network.
 //!
-//! Each test asserts the secure outcome; a failure is a finding.
-#![cfg(windows)]
+//! Each test asserts the secure outcome; a failure is a finding. Runs on
+//! Windows (named pipes) and Unix (FIFOs) alike.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -16,8 +16,7 @@ use oneclient_broker::{
     Activity, ActivityKind, BoxFuture, BrokerHost, ChangeKind, ChangeRule, ConfirmPrompt,
     GameAccount, LaunchDescriptor, OpenTarget, PickRequest, RunningBroker,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use url::Url;
 use uuid::Uuid;
 
@@ -137,20 +136,68 @@ async fn capture() -> (String, Arc<Mutex<Vec<String>>>) {
 }
 
 struct Rat {
-    up: NamedPipeClient,
-    down: NamedPipeClient,
+    up: Box<dyn AsyncWrite + Unpin + Send>,
+    down: Box<dyn AsyncRead + Unpin + Send>,
     next: u32,
     _broker: RunningBroker,
+    _fifos: Option<TempDir>,
 }
 
-async fn open_pipe(name: &str, write: bool) -> NamedPipeClient {
+/// A directory removed on drop
+struct TempDir(PathBuf);
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Opens the game's ends of the broker's two channels, as the agent does
+#[cfg(windows)]
+async fn open_channels(
+    endpoint: &oneclient_broker::Endpoint,
+) -> (
+    Box<dyn AsyncWrite + Unpin + Send>,
+    Box<dyn AsyncRead + Unpin + Send>,
+) {
+    use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
+    async fn open(name: &str, write: bool) -> NamedPipeClient {
+        for _ in 0..200 {
+            match ClientOptions::new().write(write).open(name) {
+                Ok(pipe) => return pipe,
+                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+        panic!("couldn't open {name}");
+    }
+    let up = open(&endpoint.up, true).await;
+    let down = open(&endpoint.down, false).await;
+    (Box::new(up), Box::new(down))
+}
+
+/// `up` opens once the broker reads it; `down` is opened before the hello
+/// so the broker's write end finds a reader
+#[cfg(unix)]
+async fn open_channels(
+    endpoint: &oneclient_broker::Endpoint,
+) -> (
+    Box<dyn AsyncWrite + Unpin + Send>,
+    Box<dyn AsyncRead + Unpin + Send>,
+) {
+    use tokio::net::unix::pipe::OpenOptions;
+    let mut up = None;
     for _ in 0..200 {
-        match ClientOptions::new().write(write).open(name) {
-            Ok(pipe) => return pipe,
+        match OpenOptions::new().open_sender(&endpoint.up) {
+            Ok(sender) => {
+                up = Some(sender);
+                break;
+            }
             Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
         }
     }
-    panic!("couldn't open {name}");
+    let up = up.unwrap_or_else(|| panic!("couldn't open {}", endpoint.up));
+    let down = OpenOptions::new().open_receiver(&endpoint.down).unwrap();
+    (Box::new(up), Box::new(down))
 }
 
 impl Rat {
@@ -162,16 +209,24 @@ impl Rat {
             .proxy(reqwest::Proxy::all(&proxy).unwrap())
             .build()
             .unwrap();
-        let descriptor = LaunchDescriptor::new(7, Uuid::from_u128(ME), vec![], None, None);
+        let fifos = cfg!(unix).then(|| {
+            TempDir(std::env::temp_dir().join(format!("red-team-{}", Uuid::new_v4().simple())))
+        });
+        let descriptor = LaunchDescriptor::new(
+            7,
+            Uuid::from_u128(ME),
+            vec![],
+            None,
+            fifos.as_ref().map(|dir| dir.0.clone()),
+        );
         let broker = oneclient_broker::start(&descriptor, host, http).unwrap();
-        let endpoint = broker.endpoint().clone();
-        let up = open_pipe(&endpoint.up, true).await;
-        let down = open_pipe(&endpoint.down, false).await;
+        let (up, down) = open_channels(broker.endpoint()).await;
         let mut rat = Self {
             up,
             down,
             next: 1,
             _broker: broker,
+            _fifos: fifos,
         };
         let hello = rat
             .call(Request::Hello {
@@ -577,6 +632,10 @@ async fn programs_and_custom_schemes_never_open() {
     let host = Host::new(true);
     let (mut rat, _seen) = Rat::connect(host.clone()).await;
     for target in [
+        "/bin/sh",
+        "file:///bin/sh",
+        "/etc/passwd",
+        "x-scheme-handler:whatever",
         r"C:\Windows\System32\cmd.exe",
         "ms-settings:privacy",
         "search-ms:query=x&crumb=location:\\\\evil.example\\share",
