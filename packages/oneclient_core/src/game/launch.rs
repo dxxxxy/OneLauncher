@@ -1649,14 +1649,50 @@ async fn protect_launch(
                     || crate::security::has_voice_mod(&game_dir.join("mods")).await
             }
         };
-        let mut extra_read_only: Vec<PathBuf> = settings
+        // the game reads and writes all of its own folder
+        for dir in [game_dir, cluster_dir.as_path()] {
+            if let Some(reason) = oneclient_sandbox::game_dir_refusal(dir) {
+                return Err(GameError::UnsafeGameDir {
+                    dir: dir.display().to_string(),
+                    reason: reason.to_string(),
+                }
+                .into());
+            }
+        }
+        // grants saved before a folder holding something sensitive was
+        // refused are dropped, not applied
+        let grants: Vec<_> = settings
             .grants
+            .iter()
+            .filter(|g| match oneclient_sandbox::grant_refusal(&g.path) {
+                Some(reason) => {
+                    tracing::warn!(
+                        cluster_id = cluster.id,
+                        path = %g.path.display(),
+                        reason,
+                        "not sharing a folder that holds something sensitive"
+                    );
+                    state
+                        .services
+                        .events
+                        .notify("A shared folder was left out")
+                        .body(format!(
+                            "{} holds {reason}, so the game can't have it. Share a folder inside it instead.",
+                            g.path.display()
+                        ))
+                        .error()
+                        .send();
+                    false
+                }
+                None => true,
+            })
+            .collect();
+        let mut extra_read_only: Vec<PathBuf> = grants
             .iter()
             .filter(|g| !g.write)
             .map(|g| g.path.clone())
             .collect();
-        let extra_read_write = settings
-            .grants
+        let extra_read_write = grants
             .iter()
             .filter(|g| g.write)
             .map(|g| g.path.clone())

@@ -79,9 +79,9 @@ impl InstanceSecurity {
         }
     }
 
-    /// Adds a folder unless it is one rats go after
+    /// Adds a folder unless it is, or holds, one rats go after
     pub fn grant(&mut self, path: PathBuf, write: bool) -> Result<(), &'static str> {
-        if let Some(reason) = oneclient_sandbox::sensitive_reason(&path) {
+        if let Some(reason) = oneclient_sandbox::grant_refusal(&path) {
             return Err(reason);
         }
         self.grants.retain(|g| g.path != path);
@@ -106,6 +106,20 @@ mod tests {
                 )
                 .is_err()
         );
+        // nor anything that holds one
+        let dirs = directories::BaseDirs::new().unwrap();
+        for holds in [
+            dirs.home_dir(),
+            dirs.home_dir().parent().unwrap(),
+            dirs.config_dir(),
+            std::path::Path::new(r"C:\Users\me\AppData\Local\Google"),
+        ] {
+            assert!(
+                security.grant(holds.to_path_buf(), false).is_err(),
+                "{}",
+                holds.display()
+            );
+        }
         assert!(
             security
                 .grant(PathBuf::from(r"C:\Users\me\Downloads"), false)

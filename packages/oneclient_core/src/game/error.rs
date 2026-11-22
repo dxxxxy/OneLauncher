@@ -67,6 +67,11 @@ pub enum GameError {
     )]
     Sandbox(String),
 
+    #[error(
+        "this instance's game folder, {dir}, holds {reason}. A sandboxed game can read everything in its folder, so OneClient won't launch it there. Give the instance its own folder, or move OneClient's data folder somewhere else."
+    )]
+    UnsafeGameDir { dir: String, reason: String },
+
     #[error("OneClient could not start the account protection for this game: {0}")]
     Broker(String),
 

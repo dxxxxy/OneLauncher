@@ -16,6 +16,8 @@ path = "src/lib.rs"
 [dependencies]
 polyio.workspace = true
 
+directories.workspace = true
+
 serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
 tokio.workspace = true

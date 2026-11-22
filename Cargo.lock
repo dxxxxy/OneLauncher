@@ -5199,6 +5199,7 @@ dependencies = [
 name = "oneclient_sandbox"
 version = "2.11.0"
 dependencies = [
+ "directories",
  "landlock",
  "libc",
  "polyio",

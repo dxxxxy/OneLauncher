@@ -28,7 +28,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-pub use sensitive::{is_sensitive_path, sensitive_reason};
+pub use sensitive::{game_dir_refusal, grant_refusal, is_sensitive_path, sensitive_reason};
 pub use spawn::{GameChild, SpawnSpec};
 
 #[derive(Debug, thiserror::Error)]
