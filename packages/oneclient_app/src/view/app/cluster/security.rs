@@ -7,8 +7,9 @@ use oneclient_core::security::InstanceSecurity;
 use oneclient_sandbox::Protection;
 
 use crate::components::{
-    Button, Dropdown, IconType, OverlayPopup, ScrollArea, caution_card, toggle_controlled,
+    Button, Dropdown, Icon, IconType, OverlayPopup, ScrollArea, caution_card, toggle_controlled,
 };
+use crate::hooks::{use_cluster, use_game_snapshot};
 use crate::i18n::{t, tf};
 use crate::layout::cluster_content;
 use crate::theme::{colors, rounded, text_size};
@@ -356,27 +357,374 @@ fn access_label(write: bool) -> String {
     .to_string()
 }
 
+/// What one launch amounted to, for the overview
+#[derive(Debug, Default, PartialEq)]
+struct LaunchStats {
+    blocked: usize,
+    changes: usize,
+    joins: usize,
+}
+
+fn launch_stats(group: &LaunchGroup<'_>) -> LaunchStats {
+    let mut stats = LaunchStats::default();
+    for entry in &group.entries {
+        match entry.kind {
+            ActivityKind::Denied { .. }
+            | ActivityKind::Alarm { .. }
+            | ActivityKind::SensitiveAccess { .. }
+            | ActivityKind::OpenRefused { .. }
+            | ActivityKind::DiscordDenied { .. }
+            | ActivityKind::BadHandshake
+            | ActivityKind::JoinLimited { .. } => stats.blocked += 1,
+            ActivityKind::Allowed { .. } | ActivityKind::SwitchedAccount { .. } => {
+                stats.changes += 1;
+            }
+            ActivityKind::Join { .. } => stats.joins += 1,
+            _ => {}
+        }
+    }
+    stats
+}
+
+/// Mods that did what no legitimate mod does (raised the alarm, reached for
+/// private files), most often first. The name is the jar the agent saw on
+/// the stack: a hint, since a hostile mod can fake it
+fn suspects(activity: &[Activity]) -> Vec<(String, usize)> {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for entry in activity {
+        let caller = match &entry.kind {
+            ActivityKind::Alarm { caller, .. } | ActivityKind::SensitiveAccess { caller, .. } => {
+                caller
+            }
+            _ => continue,
+        };
+        let name = if caller.trim().is_empty() {
+            t("oneclient.cluster.security.suspects.unknown").to_string()
+        } else {
+            caller.clone()
+        };
+        match counts.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((name, 1)),
+        }
+    }
+    counts.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    counts
+}
+
+fn check_line(kept: bool, text: String) -> Element {
+    let (icon, color) = if kept {
+        (IconType::Check, colors::success())
+    } else {
+        (IconType::AlertCircle, colors::danger())
+    };
+    rect()
+        .horizontal()
+        .width(Size::fill())
+        .content(Content::Flex)
+        .cross_align(Alignment::Center)
+        .spacing(8.)
+        .child(Icon::new(icon).size(14.).color(color))
+        .child(list_text(text, colors::fg_primary()))
+        .into_element()
+}
+
+/// A line in "what mods can use": not a problem, just worth knowing
+fn reach_line(text: String) -> Element {
+    rect()
+        .horizontal()
+        .width(Size::fill())
+        .content(Content::Flex)
+        .cross_align(Alignment::Center)
+        .spacing(8.)
+        .child(
+            Icon::new(IconType::InfoCircle)
+                .size(14.)
+                .color(colors::fg_secondary()),
+        )
+        .child(list_text(text, colors::fg_primary()))
+        .into_element()
+}
+
+fn column(title: &'static str, lines: Vec<Element>) -> Element {
+    rect()
+        .vertical()
+        .width(Size::flex(1.))
+        .spacing(6.)
+        .child(
+            label()
+                .text(title)
+                .font_size(text_size(12.))
+                .font_weight(FontWeight::SEMI_BOLD)
+                .color(colors::fg_secondary()),
+        )
+        .children(lines)
+        .into_element()
+}
+
+fn stat_tile(value: usize, caption: &'static str) -> Element {
+    rect()
+        .vertical()
+        .width(Size::flex(1.))
+        .spacing(2.)
+        .padding(Gaps::new_all(10.))
+        .corner_radius(rounded(8.))
+        .background(colors::page_elevated())
+        .child(
+            label()
+                .text(value.to_string())
+                .font_size(text_size(20.))
+                .font_weight(FontWeight::BOLD)
+                .color(colors::fg_strong()),
+        )
+        .child(
+            label()
+                .text(caption)
+                .font_size(text_size(12.))
+                .color(colors::fg_secondary()),
+        )
+        .into_element()
+}
+
+/// The top of the page: how protected the game is, what mods can and can't
+/// reach, and how the latest launch went
+fn overview(
+    protection: Option<&Protection>,
+    running: bool,
+    settings: &InstanceSecurity,
+    latest: Option<&LaunchGroup<'_>>,
+) -> Element {
+    let (title, color) = match protection {
+        Some(Protection::Full) => (
+            t("oneclient.cluster.security.overview.full"),
+            colors::success(),
+        ),
+        Some(Protection::Partial(_)) => (
+            t("oneclient.cluster.security.overview.partial"),
+            colors::code_warn(),
+        ),
+        Some(Protection::Off(_)) => (
+            t("oneclient.cluster.security.overview.off"),
+            colors::danger(),
+        ),
+        None => (
+            t("oneclient.cluster.security.overview.checking"),
+            colors::fg_secondary(),
+        ),
+    };
+    let subtitle = if running {
+        t("oneclient.cluster.security.overview.now")
+    } else {
+        t("oneclient.cluster.security.overview.next")
+    };
+    let sandboxed = protection.is_some_and(Protection::is_sandboxed);
+
+    let kept: Vec<Element> = if sandboxed {
+        [
+            "oneclient.cluster.security.overview.kept.token",
+            "oneclient.cluster.security.overview.kept.browsers",
+            "oneclient.cluster.security.overview.kept.discord",
+            "oneclient.cluster.security.overview.kept.wallets",
+            "oneclient.cluster.security.overview.kept.launchers",
+            "oneclient.cluster.security.overview.kept.files",
+        ]
+        .into_iter()
+        .map(|key| check_line(true, t(key).to_string()))
+        .collect()
+    } else {
+        vec![check_line(
+            false,
+            t("oneclient.cluster.security.overview.exposed").to_string(),
+        )]
+    };
+
+    let mut reach = vec![
+        reach_line(t("oneclient.cluster.security.overview.reach.instance").to_string()),
+        reach_line(t("oneclient.cluster.security.overview.reach.internet").to_string()),
+    ];
+    if !settings.grants.is_empty() {
+        reach.push(reach_line(tf(
+            "oneclient.cluster.security.overview.reach.folders",
+            &[&settings.grants.len()],
+        )));
+    }
+    match settings.microphone {
+        Some(true) => reach.push(reach_line(
+            t("oneclient.cluster.security.overview.reach.microphone").to_string(),
+        )),
+        None => reach.push(reach_line(
+            t("oneclient.cluster.security.overview.reach.microphone_auto").to_string(),
+        )),
+        Some(false) => {}
+    }
+    if settings.localhost {
+        reach.push(reach_line(
+            t("oneclient.cluster.security.overview.reach.localhost").to_string(),
+        ));
+    }
+
+    let latest = latest.map(|group| {
+        let stats = launch_stats(group);
+        rect()
+            .vertical()
+            .width(Size::fill())
+            .spacing(6.)
+            .child(
+                label()
+                    .text(t("oneclient.cluster.security.overview.latest"))
+                    .font_size(text_size(12.))
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .color(colors::fg_secondary()),
+            )
+            .child(
+                rect()
+                    .horizontal()
+                    .width(Size::fill())
+                    .content(Content::Flex)
+                    .spacing(8.)
+                    .child(stat_tile(
+                        stats.blocked,
+                        t("oneclient.cluster.security.overview.blocked"),
+                    ))
+                    .child(stat_tile(
+                        stats.changes,
+                        t("oneclient.cluster.security.overview.changes"),
+                    ))
+                    .child(stat_tile(
+                        stats.joins,
+                        t("oneclient.cluster.security.overview.joins"),
+                    )),
+            )
+            .into_element()
+    });
+
+    rect()
+        .vertical()
+        .width(Size::fill())
+        .spacing(16.)
+        .padding(Gaps::new_all(16.))
+        .margin(Gaps::new(12., 0., 4., 0.))
+        .corner_radius(rounded(12.))
+        .background(colors::component_bg())
+        .border(border_all_color(1., colors::component_border()))
+        .child(
+            rect()
+                .horizontal()
+                .cross_align(Alignment::Center)
+                .spacing(12.)
+                .child(Icon::new(IconType::Lock01).size(28.).color(color))
+                .child(
+                    rect()
+                        .vertical()
+                        .spacing(2.)
+                        .child(
+                            label()
+                                .text(title)
+                                .font_size(text_size(18.))
+                                .font_weight(FontWeight::SEMI_BOLD)
+                                .color(colors::fg_strong()),
+                        )
+                        .child(
+                            label()
+                                .text(subtitle)
+                                .font_size(text_size(12.5))
+                                .color(colors::fg_secondary()),
+                        ),
+                ),
+        )
+        .child(
+            rect()
+                .horizontal()
+                .width(Size::fill())
+                .content(Content::Flex)
+                .spacing(16.)
+                .child(column(
+                    t("oneclient.cluster.security.overview.kept_title"),
+                    kept,
+                ))
+                .child(column(
+                    t("oneclient.cluster.security.overview.reach_title"),
+                    reach,
+                )),
+        )
+        .maybe_child(latest)
+        .into_element()
+}
+
+/// A warning card naming the mods that set off alarms, if any did
+fn suspects_card(activity: &[Activity]) -> Option<Element> {
+    let suspects = suspects(activity);
+    if suspects.is_empty() {
+        return None;
+    }
+    let lines = suspects
+        .into_iter()
+        .take(5)
+        .map(|(name, count)| tf("oneclient.cluster.security.suspects.line", &[&name, &count]))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(
+        caution_card(
+            t("oneclient.cluster.security.suspects.title"),
+            format!(
+                "{}\n\n{lines}",
+                t("oneclient.cluster.security.suspects.body")
+            ),
+        )
+        .into_element(),
+    )
+}
+
 impl Component for ClusterSecurity {
     fn render(&self) -> impl IntoElement {
         let cluster_id = self.cluster_id;
         let mut settings = use_state(|| None::<InstanceSecurity>);
         let mut confirming_off = use_state(|| false);
         let mut grant_error = use_state(|| None::<String>);
-        let mut refresh = use_state(|| 0u32);
+        let mut refresh = use_state(|| 0u64);
+        let mut shown = use_state(|| None::<Protection>);
+        let running = use_game_snapshot().is_running(cluster_id);
+        let folder_name = use_cluster(cluster_id)
+            .map(|c| c.folder_name.clone())
+            .unwrap_or_default();
         use_hook(move || {
             spawn(async move {
                 settings.set(Some(InstanceSecurity::load(cluster_id).await));
             })
+        });
+        // new activity and protection changes show as they happen
+        use_hook(move || {
+            spawn(async move {
+                let Ok(state) = crate::launcher::state() else {
+                    return;
+                };
+                let mut changes = state.security.subscribe();
+                while changes.changed().await.is_ok() {
+                    let revision = *changes.borrow_and_update();
+                    refresh.set(revision);
+                }
+            })
+        });
+        // live while the game runs, predicted from the settings otherwise
+        let key = (running, *refresh.read(), settings.read().clone());
+        use_side_effect_with_deps(&key, move |_| {
+            let folder_name = folder_name.clone();
+            spawn(async move {
+                let Ok(state) = crate::launcher::state() else {
+                    return;
+                };
+                let protection =
+                    oneclient_core::security::shown_protection(&state, cluster_id, &folder_name)
+                        .await;
+                shown.set(Some(protection));
+            });
         });
 
         let Some(current) = settings.read().clone() else {
             return cluster_content().into_element();
         };
         let state = crate::launcher::state().ok();
-        let _ = *refresh.read();
-        let protection = state
-            .as_ref()
-            .and_then(|s| s.security.protection(cluster_id));
+        let protection = shown.read().clone();
         let activity: Vec<Activity> = state
             .as_ref()
             .map(|s| s.security.activity_for(cluster_id))
@@ -619,12 +967,11 @@ impl Component for ClusterSecurity {
             IconType::Eye,
             t("oneclient.cluster.security.activity.title"),
             t("oneclient.cluster.security.activity.description"),
-            Button::new()
-                .small()
-                .secondary()
-                .on_press(move |_| *refresh.write() += 1)
-                .text(t("oneclient.cluster.security.activity.refresh")),
+            rect(),
         );
+        let groups = group_by_launch(&activity);
+        let overview = overview(shown.read().as_ref(), running, &current, groups.first());
+        let suspects = suspects_card(&activity);
 
         cluster_content()
             .child(
@@ -633,6 +980,8 @@ impl Component for ClusterSecurity {
                     .height(Size::fill())
                     .scrollbar_gutter(true)
                     .spacing(4.)
+                    .child(overview)
+                    .append_children(suspects)
                     .child(section_header(t(
                         "oneclient.cluster.security.section.protection",
                     )))
@@ -756,6 +1105,58 @@ mod tests {
         ActivityKind::Connected {
             agent_version: "t".into(),
         }
+    }
+
+    fn alarm(caller: &str) -> ActivityKind {
+        ActivityKind::Alarm {
+            method: "POST".into(),
+            url: "https://authserver.mojang.com/".into(),
+            reason: "r".into(),
+            caller: caller.into(),
+        }
+    }
+
+    #[test]
+    fn mods_that_set_off_alarms_are_counted_most_often_first() {
+        let log = vec![
+            at(alarm("mods/a.jar")),
+            at(join("mods/b.jar")),
+            at(ActivityKind::SensitiveAccess {
+                path: "Login Data".into(),
+                caller: "mods/b.jar".into(),
+            }),
+            at(alarm("mods/b.jar")),
+        ];
+        assert_eq!(
+            suspects(&log),
+            [("mods/b.jar".to_string(), 2), ("mods/a.jar".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn a_launch_counts_what_was_blocked_changed_and_joined() {
+        let mut log = vec![
+            at(ActivityKind::Launched),
+            at(join("a")),
+            at(join("a")),
+            at(alarm("b")),
+            at(ActivityKind::Allowed {
+                method: "PUT".into(),
+                url: "u".into(),
+                what: "change your cape".into(),
+                caller: "c".into(),
+            }),
+        ];
+        log.reverse();
+        let groups = group_by_launch(&log);
+        assert_eq!(
+            launch_stats(&groups[0]),
+            LaunchStats {
+                blocked: 1,
+                changes: 1,
+                joins: 2,
+            }
+        );
     }
 
     #[test]
