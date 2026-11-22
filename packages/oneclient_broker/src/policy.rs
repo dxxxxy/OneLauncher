@@ -675,7 +675,7 @@ mod tests {
                 .to_vec();
         substitute(
             TokenPlacement::JsonAccessToken,
-            &mut vec![],
+            &mut [],
             &mut body,
             "FAKE",
             "REAL",
@@ -690,7 +690,7 @@ mod tests {
             br#"{"accessToken":"FAKE","selectedProfile":"other","selectedProfile":"me"}"#.to_vec();
         substitute(
             TokenPlacement::JsonAccessToken,
-            &mut vec![],
+            &mut [],
             &mut body,
             "FAKE",
             "REAL",

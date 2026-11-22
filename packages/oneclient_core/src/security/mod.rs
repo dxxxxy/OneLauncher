@@ -161,7 +161,7 @@ impl SecurityService {
     pub(crate) fn push(&self, activity: Activity) {
         let mut log = self.activity.lock();
         if log.len() >= ACTIVITY_LIMIT {
-            log.pop_front();
+            make_room(&mut log);
         }
         log.push_back(activity.clone());
         drop(log);
@@ -253,6 +253,34 @@ impl SecurityService {
         }
         drop(log);
         self.changed();
+    }
+}
+
+/// What the user must still be able to see after a game floods the log:
+/// alarms, account changes and where each launch began
+fn worth_keeping(activity: &Activity) -> bool {
+    use oneclient_broker::ActivityKind as Kind;
+    matches!(
+        activity.kind,
+        Kind::Launched
+            | Kind::Alarm { .. }
+            | Kind::Allowed { .. }
+            | Kind::Refused { .. }
+            | Kind::SwitchedAccount { .. }
+            | Kind::SensitiveAccess { .. }
+    )
+}
+
+/// Drops the oldest entry that isn't worth keeping, or the oldest of all
+/// when every one is
+fn make_room(log: &mut VecDeque<Activity>) {
+    match log.iter().position(|a| !worth_keeping(a)) {
+        Some(at) => {
+            log.remove(at);
+        }
+        None => {
+            log.pop_front();
+        }
     }
 }
 
@@ -477,6 +505,45 @@ pub(crate) async fn has_voice_mod(mods_dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{SavedSession, SecurityService, denied_path};
+
+    #[test]
+    fn a_flood_of_routine_activity_keeps_what_matters() {
+        use oneclient_broker::{Activity, ActivityKind};
+        // as `push` does it, without writing the user's log on disk
+        let mut log = std::collections::VecDeque::new();
+        let mut push = |activity| {
+            if log.len() >= super::ACTIVITY_LIMIT {
+                super::make_room(&mut log);
+            }
+            log.push_back(activity);
+        };
+        push(Activity::now(1, ActivityKind::Launched));
+        push(Activity::now(
+            1,
+            ActivityKind::Allowed {
+                method: "PUT".into(),
+                url: "u".into(),
+                what: "change your cape".into(),
+                caller: "rat".into(),
+                asked: false,
+            },
+        ));
+        for n in 0..2 * super::ACTIVITY_LIMIT {
+            push(Activity::now(
+                1,
+                ActivityKind::OpenRefused {
+                    target: format!("x{n}"),
+                    caller: "rat".into(),
+                },
+            ));
+        }
+        assert_eq!(log.len(), super::ACTIVITY_LIMIT);
+        assert!(log.iter().any(|a| a.kind == ActivityKind::Launched));
+        assert!(
+            log.iter()
+                .any(|a| matches!(a.kind, ActivityKind::Allowed { .. }))
+        );
+    }
 
     #[test]
     fn the_launcher_presence_steps_aside_while_any_game_shows_one() {

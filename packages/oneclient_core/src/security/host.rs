@@ -27,6 +27,8 @@ pub struct LauncherBrokerHost {
     recent_import: parking_lot::Mutex<Option<(PathBuf, Instant)>>,
     /// Watching the user's Downloads folder for a file a mod waits for
     downloads_watch: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// When the game signed in to servers lately
+    recent_joins: parking_lot::Mutex<std::collections::VecDeque<Instant>>,
     discord: oneclient_discord::DiscordRpc,
 }
 
@@ -62,9 +64,33 @@ impl LauncherBrokerHost {
             security: Arc::clone(&state.security),
             recent_import: parking_lot::Mutex::new(None),
             downloads_watch: parking_lot::Mutex::new(None),
+            recent_joins: parking_lot::Mutex::default(),
             discord: state.discord.clone(),
         }
     }
+
+    /// Counts a server sign-in; true when it makes [`RECENT_JOINS`] within
+    /// [`RECENT_JOIN_WINDOW`], once per window
+    fn many_recent_joins(&self) -> bool {
+        count_join(&mut self.recent_joins.lock(), Instant::now())
+    }
+}
+
+/// Sign-ins within [`RECENT_JOIN_WINDOW`] that are worth telling the user
+/// about. Joining a server signs in once; hopping between a few is normal
+const RECENT_JOINS: usize = 4;
+const RECENT_JOIN_WINDOW: Duration = Duration::from_secs(10 * 60);
+
+fn count_join(joins: &mut std::collections::VecDeque<Instant>, now: Instant) -> bool {
+    while joins
+        .front()
+        .is_some_and(|at| now.duration_since(*at) > RECENT_JOIN_WINDOW)
+    {
+        joins.pop_front();
+    }
+    joins.push_back(now);
+    // exactly at the threshold: told once, not on every join after it
+    joins.len() == RECENT_JOINS
 }
 
 /// Waits for `wanted` to show up in `downloads` and copies it into `into`.
@@ -154,12 +180,52 @@ impl BrokerHost for LauncherBrokerHost {
                     .error()
                     .send();
             }
-            ActivityKind::Join { caller, .. } if caller != "minecraft" => {
+            ActivityKind::Join { caller, .. } => {
+                if caller != "minecraft" {
+                    self.events
+                        .notify("Signed in to a mod's server")
+                        .body(format!(
+                            "{} verified your Minecraft account with its server.",
+                            caller_label(caller)
+                        ))
+                        .info()
+                        .send();
+                }
+                // the caller is the game's word: a mod can call itself
+                // "minecraft", so how often counts whoever asked
+                if self.many_recent_joins() {
+                    self.events
+                        .notify(format!("Many server sign-ins in {}", self.cluster_name))
+                        .body(format!(
+                            "The game signed in to servers {RECENT_JOINS} times in {} minutes. If you weren't joining servers, a mod may be using your account to sign in elsewhere: close the game and remove mods you don't trust.",
+                            RECENT_JOIN_WINDOW.as_secs() / 60
+                        ))
+                        .error()
+                        .send();
+                }
+            }
+            ActivityKind::Refused { what, caller, .. } => {
                 self.events
-                    .notify("Signed in to a mod's server")
+                    .notify(format!("Blocked a mod in {}", self.cluster_name))
                     .body(format!(
-                        "{} verified your Minecraft account with its server.",
-                        caller_label(caller)
+                        "{} tried to {what}. Your Security settings don't allow that, so OneClient refused.",
+                        capitalise(&caller_label(caller))
+                    ))
+                    .error()
+                    .send();
+            }
+            // allowed without asking: the user still hears of it
+            ActivityKind::Allowed {
+                what,
+                caller,
+                asked: false,
+                ..
+            } => {
+                self.events
+                    .notify(format!("A mod changed your account in {}", self.cluster_name))
+                    .body(format!(
+                        "{} got to {what}, as your Security settings allow. If you didn't do this, undo it and change the setting to Ask.",
+                        capitalise(&caller_label(caller))
                     ))
                     .info()
                     .send();
@@ -200,7 +266,12 @@ impl BrokerHost for LauncherBrokerHost {
             let ui = self.security.ui()?;
             let mode = request.mode;
             let chosen = ui.pick(request).await?;
-            if let Some(reason) = oneclient_sandbox::sensitive_reason(&chosen) {
+            // a shared folder shares everything below it
+            let refusal = match mode {
+                PickMode::OpenFolder => oneclient_sandbox::grant_refusal(&chosen),
+                _ => oneclient_sandbox::sensitive_reason(&chosen),
+            };
+            if let Some(reason) = refusal {
                 self.events
                     .notify("Can't share that with the game")
                     .body(format!(
@@ -499,9 +570,9 @@ impl LauncherBrokerHost {
 
     async fn share_folder(&self, chosen: PathBuf) -> Option<PathBuf> {
         let mut settings = super::InstanceSecurity::load(self.cluster_id).await;
-        if settings.grant(chosen.clone(), false).is_ok() {
-            let _ = settings.save(self.cluster_id).await;
-        }
+        // never shared live if it couldn't be shared at all
+        settings.grant(chosen.clone(), false).ok()?;
+        let _ = settings.save(self.cluster_id).await;
         match oneclient_sandbox::grant_live(self.cluster_id, &chosen, false) {
             Ok(true) => Some(chosen),
             _ => {
@@ -522,6 +593,20 @@ impl LauncherBrokerHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frequent_sign_ins_are_told_once_per_window() {
+        let start = Instant::now();
+        let mut joins = std::collections::VecDeque::new();
+        let at = |secs| start + Duration::from_secs(secs);
+        let told: Vec<bool> = [0, 60, 120, 180, 240, 300]
+            .into_iter()
+            .map(|secs| count_join(&mut joins, at(secs)))
+            .collect();
+        assert_eq!(told, [false, false, false, true, false, false]);
+        // long after, a few joins are quiet again
+        assert!(!count_join(&mut joins, at(3600)));
+    }
 
     #[tokio::test]
     async fn only_the_exact_download_is_handed_over() {
