@@ -47,17 +47,31 @@ impl Component for ProtectionBadge {
     fn render(&self) -> impl IntoElement {
         let running = use_game_snapshot().is_running(self.cluster_id);
         let mut shown = use_state(|| None::<Protection>);
-        let mut loaded_for = use_state(|| None::<(i64, bool)>);
+        let mut loaded_for = use_state(|| None::<(i64, bool, u64)>);
+        let mut revision = use_state(|| 0u64);
+        use_hook(move || {
+            spawn(async move {
+                let Ok(state) = crate::launcher::state() else {
+                    return;
+                };
+                let mut changes = state.security.subscribe();
+                while changes.changed().await.is_ok() {
+                    let next = *changes.borrow_and_update();
+                    revision.set(next);
+                }
+            })
+        });
 
-        // again whenever the game starts or stops: the live protection
-        // replaces the prediction, and the other way round
-        let key = (self.cluster_id, running);
+        // again whenever the game starts or stops (the live protection
+        // replaces the prediction, and the other way round) and whenever
+        // the security settings or protection change
+        let key = (self.cluster_id, running, *revision.read());
         let folder_name = self.folder_name.clone();
-        use_side_effect_with_deps(&key, move |&(cluster_id, running)| {
-            if *loaded_for.peek() == Some((cluster_id, running)) {
+        use_side_effect_with_deps(&key, move |&(cluster_id, running, revision)| {
+            if *loaded_for.peek() == Some((cluster_id, running, revision)) {
                 return;
             }
-            loaded_for.set(Some((cluster_id, running)));
+            loaded_for.set(Some((cluster_id, running, revision)));
             let folder_name = folder_name.clone();
             spawn(async move {
                 let Ok(state) = crate::launcher::state() else {

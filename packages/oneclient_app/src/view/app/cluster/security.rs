@@ -300,6 +300,10 @@ fn save(mut settings: State<Option<InstanceSecurity>>, cluster_id: i64, next: In
         if let Err(err) = next.save(cluster_id).await {
             tracing::warn!("could not save security settings: {err}");
         }
+        // the shield beside Play follows
+        if let Ok(state) = crate::launcher::state() {
+            state.security.settings_changed();
+        }
     });
 }
 
@@ -707,15 +711,28 @@ impl Component for ClusterSecurity {
         });
         // live while the game runs, predicted from the settings otherwise
         let key = (running, *refresh.read(), settings.read().clone());
-        use_side_effect_with_deps(&key, move |_| {
+        use_side_effect_with_deps(&key, move |(running, _, settings)| {
+            // the settings on screen, not the file: a change being saved
+            // shows straight away
+            let Some(settings) = settings.clone() else {
+                return;
+            };
+            let running = *running;
             let folder_name = folder_name.clone();
             spawn(async move {
                 let Ok(state) = crate::launcher::state() else {
                     return;
                 };
-                let protection =
-                    oneclient_core::security::shown_protection(&state, cluster_id, &folder_name)
-                        .await;
+                let live = running
+                    .then(|| state.security.protection(cluster_id))
+                    .flatten();
+                let protection = match live {
+                    Some(live) => live,
+                    None => {
+                        oneclient_core::security::predicted_protection(&settings, &folder_name)
+                            .await
+                    }
+                };
                 shown.set(Some(protection));
             });
         });
@@ -970,7 +987,9 @@ impl Component for ClusterSecurity {
             rect(),
         );
         let groups = group_by_launch(&activity);
-        let overview = overview(shown.read().as_ref(), running, &current, groups.first());
+        // history from before launches were marked isn't one launch
+        let latest = groups.first().filter(|group| group.launched.is_some());
+        let overview = overview(shown.read().as_ref(), running, &current, latest);
         let suspects = suspects_card(&activity);
 
         cluster_content()
