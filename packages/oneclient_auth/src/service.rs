@@ -294,6 +294,15 @@ impl AuthService {
             return Ok(existing);
         }
 
+        // an empty refresh token on a live account means the secret store was
+        // unreadable this session, not that Microsoft revoked anything; going
+        // ahead would sign the user out of a perfectly good account
+        if existing.refresh_token.is_empty() && !existing.needs_sign_in() {
+            return Err(AuthError::SecretsUnavailable {
+                username: existing.username,
+            });
+        }
+
         tracing::info!(username = %existing.username, "renewing Microsoft access token");
         match msa::refresh_microsoft_account(self.net.http(), &existing).await {
             Ok(refreshed) => {

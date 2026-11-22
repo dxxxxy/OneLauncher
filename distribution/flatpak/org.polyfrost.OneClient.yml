@@ -3,6 +3,9 @@ runtime: org.gnome.Platform
 runtime-version: '51'
 sdk: org.gnome.Sdk
 command: oneclient_app
+# Games run in a sub-sandbox started through the Flatpak portal
+# (`flatpak-spawn --sandbox`), which every app may use: no
+# --talk-name=org.freedesktop.Flatpak, which would let them out instead
 finish-args:
   - --share=ipc
   - --share=network

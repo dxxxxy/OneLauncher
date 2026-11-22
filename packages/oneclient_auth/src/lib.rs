@@ -1,6 +1,6 @@
 //! Construct [`AuthService`] in the composition layer and pass it down nothing
 //! in here reaches for a global or a database
-//! Accounts persist to `auth.json`
+//! Account records persist to `auth.json`, their tokens to the OS secret store
 
 mod data;
 mod diagnostics;
@@ -9,6 +9,7 @@ mod msa;
 mod offline;
 mod service;
 mod store;
+mod vault;
 
 pub use data::{
     AccountKind, BrowserLogin, DeviceCodeLogin, MicrosoftLoginSession, MinecraftAccount,

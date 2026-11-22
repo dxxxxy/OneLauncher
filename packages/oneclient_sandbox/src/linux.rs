@@ -1,0 +1,548 @@
+//! Linux: bubblewrap when it works here, Landlock otherwise
+//!
+//! bubblewrap builds a private filesystem view: system directories read-only,
+//! the user's home replaced by an empty tmpfs with only the instance and the
+//! launcher's runtime files bound back in, and no D-Bus session bus, so the
+//! keyring can't be asked for passwords. Landlock (kernel 5.13+) restricts
+//! file access without namespaces but can't hide sockets, so it is reported
+//! as partial protection.
+
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
+use landlock::{
+    ABI, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus, Scope,
+    path_beneath_rules,
+};
+
+use crate::{GameChild, Protection, SandboxPolicy, SandboxResult, SpawnSpec};
+
+pub(crate) enum Plan {
+    Bwrap {
+        program: PathBuf,
+        args: Vec<OsString>,
+        gaps: Vec<String>,
+    },
+    Landlock {
+        read: Vec<PathBuf>,
+        write: Vec<PathBuf>,
+        gaps: Vec<String>,
+    },
+    /// Inside OneClient's Flatpak: a portal sub-sandbox (see crate::flatpak)
+    FlatpakSpawn {
+        program: PathBuf,
+        policy: Box<SandboxPolicy>,
+        gaps: Vec<String>,
+    },
+    Off(String),
+}
+
+const FLATPAK_OFF: &str = "Flatpak's portal couldn't start a sandbox for the game, so it shares OneClient's own permissions";
+const AUDIO_GAP: &str =
+    "Game audio goes through your sound server, which can't keep the microphone out on Linux";
+const X11_GAP: &str = "X11 lets any window read the keyboard and screen of others; use a Wayland session for full protection";
+const NO_BWRAP_GAP: &str = "bubblewrap isn't available, so the game can still reach the keyring and other apps through D-Bus; install bubblewrap for full protection";
+const BWRAP_BLOCKED_GAP: &str = "Your system blocks bubblewrap (on Ubuntu 23.10 and later, AppArmor does), so the game can still reach the keyring and other apps through D-Bus; allow bubblewrap in AppArmor for full protection";
+
+/// Why there's no bubblewrap: not installed, or installed but stopped
+fn no_bwrap_gap() -> String {
+    let installed = bwrap_candidates().iter().any(|path| path.is_file());
+    if installed {
+        BWRAP_BLOCKED_GAP
+    } else {
+        NO_BWRAP_GAP
+    }
+    .into()
+}
+
+/// `flatpak-spawn`, when this is OneClient's Flatpak and the portal will
+/// start a sub-sandbox
+fn flatpak_spawn() -> Option<&'static PathBuf> {
+    static FOUND: OnceLock<Option<PathBuf>> = OnceLock::new();
+    FOUND
+        .get_or_init(|| {
+            std::env::var_os("FLATPAK_ID")?;
+            let program = PathBuf::from("/usr/bin/flatpak-spawn");
+            let works = program.is_file()
+                && std::process::Command::new(&program)
+                    .args(["--sandbox", "--no-network", "/bin/true"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .is_ok_and(|s| s.success());
+            works.then_some(program)
+        })
+        .as_ref()
+}
+
+fn x11() -> bool {
+    std::env::var_os("DISPLAY").is_some() && std::env::var_os("WAYLAND_DISPLAY").is_none()
+}
+
+fn flatpak_gaps() -> Vec<String> {
+    let mut gaps = vec![crate::flatpak::GAP.to_string()];
+    if x11() {
+        gaps.push(X11_GAP.into());
+    }
+    gaps
+}
+
+/// What [`Plan::build`] would report, without building anything
+pub(crate) fn expected(microphone: bool) -> Protection {
+    if std::env::var_os("FLATPAK_ID").is_some() {
+        return match flatpak_spawn() {
+            Some(_) => Protection::Partial(flatpak_gaps()),
+            None => Protection::Off(FLATPAK_OFF.into()),
+        };
+    }
+    if bwrap().is_none() {
+        return Protection::Partial(vec![no_bwrap_gap()]);
+    }
+    let mut gaps = Vec::new();
+    if !sound_sockets().is_empty() && !microphone {
+        gaps.push(AUDIO_GAP.into());
+    }
+    if x11() {
+        gaps.push(X11_GAP.into());
+    }
+    if gaps.is_empty() {
+        Protection::Full
+    } else {
+        Protection::Partial(gaps)
+    }
+}
+
+fn bwrap_candidates() -> Vec<PathBuf> {
+    [
+        std::env::var_os("ONECLIENT_BWRAP").map(PathBuf::from),
+        std::env::var_os("APPDIR").map(|d| PathBuf::from(d).join("usr/bin/bwrap")),
+        Some(PathBuf::from("/usr/bin/bwrap")),
+        Some(PathBuf::from("/usr/local/bin/bwrap")),
+        Some(PathBuf::from("/run/current-system/sw/bin/bwrap")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+fn bwrap() -> Option<&'static PathBuf> {
+    static FOUND: OnceLock<Option<PathBuf>> = OnceLock::new();
+    FOUND
+        .get_or_init(|| {
+            bwrap_candidates().into_iter().find(|path| {
+                // installed is not enough: user namespaces may be blocked
+                // (Ubuntu 24.04 AppArmor, hardened kernels)
+                path.is_file()
+                    && std::process::Command::new(path)
+                        .args(["--ro-bind", "/", "/", "--", "/bin/true"])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                        .is_ok_and(|s| s.success())
+            })
+        })
+        .as_ref()
+}
+
+/// Where `/etc/resolv.conf` really is, when that's somewhere the sandbox
+/// doesn't already show
+fn resolver_file() -> Option<PathBuf> {
+    let target = std::fs::canonicalize("/etc/resolv.conf").ok()?;
+    (!target.starts_with("/etc")).then_some(target)
+}
+
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn push(args: &mut Vec<OsString>, parts: &[&str]) {
+    args.extend(parts.iter().map(OsString::from));
+}
+
+fn bind(args: &mut Vec<OsString>, kind: &str, path: &Path) {
+    let path = canonical(path);
+    args.push(kind.into());
+    args.push(path.clone().into());
+    args.push(path.into());
+}
+
+/// A socket programs find by name, such as `$XDG_RUNTIME_DIR/wayland-0`:
+/// bound from wherever it really is to that name. The name can be a link
+/// (WSLg links `wayland-0` into /mnt/wslg) the sandbox doesn't carry over,
+/// so binding only the target leaves the game without a display
+fn bind_named(args: &mut Vec<OsString>, kind: &str, path: &Path) {
+    args.push(kind.into());
+    args.push(canonical(path).into());
+    args.push(path.into());
+}
+
+fn sound_sockets() -> Vec<PathBuf> {
+    sound_sockets_in(
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .as_deref()
+            .map(Path::new),
+        std::env::var_os("PULSE_SERVER").as_deref(),
+    )
+}
+
+/// The sound server's sockets: the usual ones in the runtime dir, and the
+/// one `PULSE_SERVER` names (WSLg keeps it in /mnt/wslg)
+fn sound_sockets_in(runtime_dir: Option<&Path>, pulse_server: Option<&OsStr>) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = runtime_dir
+        .into_iter()
+        .flat_map(|dir| [dir.join("pulse/native"), dir.join("pipewire-0")])
+        .collect();
+    if let Some(server) = pulse_server.and_then(OsStr::to_str) {
+        found.extend(
+            server
+                .split_whitespace()
+                .filter_map(|entry| entry.strip_prefix("unix:"))
+                .map(PathBuf::from),
+        );
+    }
+    found.retain(|path| path.exists());
+    found.dedup();
+    found
+}
+
+impl Plan {
+    pub(crate) async fn build(policy: &SandboxPolicy) -> SandboxResult<Self> {
+        Self::build_with(policy, true).await
+    }
+
+    /// `use_bwrap` false builds the Landlock fallback even where bubblewrap
+    /// is installed, so tests can check it
+    pub(crate) async fn build_with(policy: &SandboxPolicy, use_bwrap: bool) -> SandboxResult<Self> {
+        if std::env::var_os("FLATPAK_ID").is_some() {
+            let Some(program) = flatpak_spawn() else {
+                return Ok(Self::Off(FLATPAK_OFF.into()));
+            };
+            for dir in policy
+                .read_write
+                .iter()
+                .chain(&policy.extra_read_write)
+                .chain([&policy.home, &policy.temp])
+            {
+                std::fs::create_dir_all(dir)?;
+            }
+            return Ok(Self::FlatpakSpawn {
+                program: program.clone(),
+                policy: Box::new(policy.clone()),
+                gaps: flatpak_gaps(),
+            });
+        }
+
+        let mut read: Vec<PathBuf> = policy
+            .runtime
+            .iter()
+            .chain(&policy.extra_read_only)
+            .cloned()
+            .collect();
+        let write: Vec<PathBuf> = policy
+            .read_write
+            .iter()
+            .chain(&policy.extra_read_write)
+            .chain([&policy.home, &policy.temp])
+            .cloned()
+            .collect();
+        for dir in &write {
+            std::fs::create_dir_all(dir)?;
+        }
+
+        let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+        let x11 = x11();
+
+        if let Some(program) = bwrap().filter(|_| use_bwrap) {
+            let mut args: Vec<OsString> = Vec::new();
+            push(&mut args, &["--ro-bind", "/usr", "/usr"]);
+            for dir in [
+                "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc", "/opt", "/nix",
+            ] {
+                push(&mut args, &["--ro-bind-try", dir, dir]);
+            }
+            push(
+                &mut args,
+                &[
+                    "--proc",
+                    "/proc",
+                    "--dev",
+                    "/dev",
+                    "--ro-bind",
+                    "/sys",
+                    "/sys",
+                ],
+            );
+            push(&mut args, &["--dev-bind-try", "/dev/dri", "/dev/dri"]);
+            // WSL's GPU: without it Mesa falls back to drawing on the CPU
+            push(&mut args, &["--dev-bind-try", "/dev/dxg", "/dev/dxg"]);
+            if let Ok(entries) = std::fs::read_dir("/dev") {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    if name.to_string_lossy().starts_with("nvidia") {
+                        bind(&mut args, "--dev-bind", &entry.path());
+                    }
+                }
+            }
+            if policy.microphone {
+                push(&mut args, &["--dev-bind-try", "/dev/snd", "/dev/snd"]);
+            }
+            push(&mut args, &["--tmpfs", "/tmp", "--tmpfs", "/run"]);
+            for dir in [
+                "/run/systemd/resolve",
+                "/run/NetworkManager",
+                "/run/resolvconf",
+                "/run/opengl-driver",
+                "/run/current-system",
+            ] {
+                push(&mut args, &["--ro-bind-try", dir, dir]);
+            }
+            // DNS: /etc/resolv.conf is often a link, on WSL into /mnt/wsl,
+            // and a game that can't resolve names can't play online
+            if let Some(resolver) = resolver_file() {
+                bind(&mut args, "--ro-bind-try", &resolver);
+            }
+            if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+                let home = canonical(&home);
+                args.push("--tmpfs".into());
+                args.push(home.into());
+            }
+
+            let mut gaps = Vec::new();
+            if let Some(runtime_dir) = &runtime_dir {
+                args.push("--dir".into());
+                args.push(runtime_dir.clone().into());
+                // the relay's folder, not its socket: a launcher started
+                // again while the game runs makes a new socket there, which
+                // a bind of the old one would never show
+                if let Some(relay_dir) = policy.discord_socket.as_deref().and_then(Path::parent) {
+                    let inside = runtime_dir.join(".oneclient-discord");
+                    args.push("--bind".into());
+                    args.push(relay_dir.to_path_buf().into());
+                    args.push(inside.into());
+                    args.push("--symlink".into());
+                    args.push(".oneclient-discord/discord-ipc-0".into());
+                    args.push(runtime_dir.join("discord-ipc-0").into());
+                }
+                if let Some(wayland) = std::env::var_os("WAYLAND_DISPLAY") {
+                    bind_named(&mut args, "--ro-bind-try", &runtime_dir.join(wayland));
+                }
+            }
+            let sound = sound_sockets();
+            for socket in &sound {
+                bind_named(&mut args, "--ro-bind-try", socket);
+            }
+            if !sound.is_empty() && !policy.microphone {
+                gaps.push(AUDIO_GAP.into());
+            }
+            if x11 {
+                push(
+                    &mut args,
+                    &["--ro-bind-try", "/tmp/.X11-unix", "/tmp/.X11-unix"],
+                );
+                if let Some(auth) = std::env::var_os("XAUTHORITY") {
+                    bind(&mut args, "--ro-bind-try", Path::new(&auth));
+                }
+                gaps.push(X11_GAP.into());
+            }
+
+            for dir in &read {
+                bind(&mut args, "--ro-bind-try", dir);
+            }
+            for dir in &write {
+                bind(&mut args, "--bind", dir);
+            }
+            push(
+                &mut args,
+                // its own process list: other programs' command lines can
+                // hold secrets, and nothing in a game needs to see them
+                &[
+                    "--unshare-ipc",
+                    "--unshare-pid",
+                    // the PID the launcher holds is bwrap's: killing it must
+                    // take the game with it, or a stopped game plays on
+                    "--die-with-parent",
+                    "--unshare-cgroup-try",
+                    "--cap-drop",
+                    "ALL",
+                ],
+            );
+            if policy.offline {
+                push(&mut args, &["--unshare-net"]);
+            }
+            push(&mut args, &["--"]);
+
+            return Ok(Self::Bwrap {
+                program: program.clone(),
+                args,
+                gaps,
+            });
+        }
+
+        // Landlock: what the system needs to run Java and draw a window
+        for dir in [
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/lib",
+            "/lib32",
+            "/lib64",
+            "/etc",
+            "/opt",
+            "/nix",
+            "/proc",
+            "/sys",
+            "/run",
+            "/tmp/.X11-unix",
+        ] {
+            let dir = PathBuf::from(dir);
+            if dir.exists() {
+                read.push(dir);
+            }
+        }
+        if let Some(auth) = std::env::var_os("XAUTHORITY") {
+            read.push(PathBuf::from(auth));
+        }
+        read.extend(resolver_file());
+        let mut write = write;
+        write.push(PathBuf::from("/dev"));
+
+        Ok(Self::Landlock {
+            read,
+            write,
+            gaps: vec![no_bwrap_gap()],
+        })
+    }
+
+    pub(crate) fn protection(&self) -> Protection {
+        match self {
+            Self::Bwrap { gaps, .. } if gaps.is_empty() => Protection::Full,
+            Self::Bwrap { gaps, .. }
+            | Self::Landlock { gaps, .. }
+            | Self::FlatpakSpawn { gaps, .. } => Protection::Partial(gaps.clone()),
+            Self::Off(reason) => Protection::Off(reason.clone()),
+        }
+    }
+
+    pub(crate) fn spawn(&self, spec: SpawnSpec) -> std::io::Result<GameChild> {
+        match self {
+            Self::Off(_) => crate::spawn::plain(spec),
+            Self::FlatpakSpawn {
+                program, policy, ..
+            } => {
+                let prefix = crate::flatpak::spawn_args(policy, &spec.cwd, &spec.env);
+                spec.into_tokio(Some((program.clone(), prefix)))
+                    .spawn()
+                    .map(GameChild::Tokio)
+            }
+            Self::Bwrap { program, args, .. } => {
+                let mut prefix = args.clone();
+                // `--chdir` goes before `--`
+                let dashes = prefix.len() - 1;
+                prefix.insert(dashes, spec.cwd.clone().into());
+                prefix.insert(dashes, "--chdir".into());
+                spec.into_tokio(Some((program.clone(), prefix)))
+                    .spawn()
+                    .map(GameChild::Tokio)
+            }
+            Self::Landlock { read, write, .. } => {
+                let ruleset = landlock_ruleset(read, write)
+                    .map_err(|e| std::io::Error::other(format!("landlock: {e}")))?;
+                let slot = Mutex::new(Some(ruleset));
+                let mut command = spec.into_tokio(None);
+                // SAFETY: the closure only takes a prepared ruleset out of an
+                // uncontended mutex and makes the restrict syscalls; no
+                // allocation happens between fork and exec
+                unsafe {
+                    command.pre_exec(move || {
+                        let ruleset = slot.lock().ok().and_then(|mut s| s.take());
+                        if let Some(ruleset) = ruleset {
+                            match ruleset.restrict_self() {
+                                Ok(status) if status.ruleset != RulesetStatus::NotEnforced => {}
+                                Ok(_) => {
+                                    return Err(std::io::Error::other("landlock not enforced"));
+                                }
+                                Err(_) => return Err(std::io::Error::other("landlock failed")),
+                            }
+                        }
+                        Ok(())
+                    });
+                }
+                command.spawn().map(GameChild::Tokio)
+            }
+        }
+    }
+}
+
+fn landlock_ruleset(
+    read: &[PathBuf],
+    write: &[PathBuf],
+) -> Result<landlock::RulesetCreated, landlock::RulesetError> {
+    let abi = ABI::V5;
+    let mut ruleset = Ruleset::default().handle_access(AccessFs::from_all(abi))?;
+    // kernels with ABI 6 also keep abstract sockets and signals inside
+    ruleset = match ruleset.scope(Scope::from_all(ABI::V6)) {
+        Ok(scoped) => scoped,
+        Err(_) => Ruleset::default().handle_access(AccessFs::from_all(abi))?,
+    };
+    ruleset
+        .create()?
+        .add_rules(path_beneath_rules(read, AccessFs::from_read(abi)))?
+        .add_rules(path_beneath_rules(write, AccessFs::from_all(abi)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("oneclient-linux-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_linked_socket_keeps_its_name_in_the_sandbox() {
+        let dir = scratch("named");
+        let real = dir.join("wslg").join("wayland-0");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, b"").unwrap();
+        let runtime = dir.join("runtime");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::os::unix::fs::symlink(&real, runtime.join("wayland-0")).unwrap();
+
+        let mut args = Vec::new();
+        bind_named(&mut args, "--ro-bind-try", &runtime.join("wayland-0"));
+        assert_eq!(
+            args,
+            [
+                OsString::from("--ro-bind-try"),
+                canonical(&real).into(),
+                runtime.join("wayland-0").into(),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sound_comes_from_the_runtime_dir_and_pulse_server() {
+        let dir = scratch("sound");
+        let runtime = dir.join("runtime");
+        std::fs::create_dir_all(runtime.join("pulse")).unwrap();
+        std::fs::write(runtime.join("pulse/native"), b"").unwrap();
+        let wslg = dir.join("PulseServer");
+        std::fs::write(&wslg, b"").unwrap();
+
+        let server = OsString::from(format!("unix:{} tcp:localhost", wslg.display()));
+        assert_eq!(
+            sound_sockets_in(Some(&runtime), Some(&server)),
+            [runtime.join("pulse/native"), wslg.clone()]
+        );
+        // a server that isn't there is left out
+        let gone = OsString::from("unix:/nonexistent/pulse");
+        assert!(sound_sockets_in(None, Some(&gone)).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

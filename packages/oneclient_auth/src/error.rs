@@ -142,6 +142,14 @@ pub enum AuthError {
     #[error("account {0} is not registered")]
     AccountNotFound(uuid::Uuid),
 
+    #[error("the secure credential store failed: {0}")]
+    Vault(String),
+
+    #[error(
+        "OneClient could not read the saved sign-in for {username} from your system keyring. Unlock your keyring and try again."
+    )]
+    SecretsUnavailable { username: String },
+
     #[error("account already exists for username {username:?}")]
     DuplicateUsername { username: String },
 }

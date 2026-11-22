@@ -10,7 +10,8 @@ use oneclient_core::settings::ViewLayout;
 use crate::components::ClusterMenuTarget;
 use crate::components::{
     ART_PREVIEW_EDGE, Button, Dropdown, DynamicArt, FilterMenu, FilterOption, Icon, IconType,
-    InstanceRow, ScrollArea, Segment, SegmentedControl, TabBar, TabItem, TextInput, VersionCard,
+    InstanceRow, ProtectionBadge, ScrollArea, Segment, SegmentedControl, TabBar, TabItem, TextInput,
+    VersionCard,
     open_folder_button,
 };
 use crate::hooks::{
@@ -724,6 +725,7 @@ struct Sidebar {
     description: Option<String>,
     meta: Vec<(&'static str, String)>,
     folder: Option<PathBuf>,
+    folder_name: String,
     picker: Option<Element>,
 }
 
@@ -750,6 +752,7 @@ impl Sidebar {
                 ),
             ],
             folder: cluster.dir().ok(),
+            folder_name: cluster.folder_name.clone(),
             picker: None,
         }
     }
@@ -881,6 +884,16 @@ impl Component for Sidebar {
                                 dispatch,
                                 launch_button_state(&game, cluster_id, syncing, shared_dir_taken),
                             ))
+                            .child(
+                                rect()
+                                    .height(Size::fill())
+                                    .padding(Gaps::new(0., 4., 0., 4.))
+                                    .main_align(Alignment::Center)
+                                    .child(
+                                        ProtectionBadge::new(cluster_id, self.folder_name.clone())
+                                            .size(16.),
+                                    ),
+                            )
                             .child(
                                 Button::new()
                                     .secondary()

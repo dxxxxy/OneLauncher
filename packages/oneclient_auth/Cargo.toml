@@ -36,5 +36,14 @@ tracing.workspace = true
 url.workspace = true
 uuid.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Security_Cryptography"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { workspace = true, features = ["async-secret-service", "tokio", "crypto-rust"] }
+
 [dev-dependencies]
 tokio = { workspace = true }

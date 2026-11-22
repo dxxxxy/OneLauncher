@@ -137,6 +137,7 @@ async fn emit(
     // Read on the way past rather than re-opening the log afterwards a crash
     // can take the log with it
     crash_watch.observe(&text);
+    crate::security::observe_log_line(cluster_id, &text, events);
     events.game_log(cluster_id, text);
 }
 

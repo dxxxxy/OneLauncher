@@ -510,6 +510,9 @@ pub async fn start_launcher(
         std::sync::Arc::clone(&state.auth),
         state.services.events.clone(),
     );
+    state
+        .security
+        .set_ui(std::sync::Arc::new(crate::security_ui::AppSecurityUi));
     oneclient_core::run_startup_tasks(&state);
 
     let data_dir = oneclient_common::paths::data_dir()

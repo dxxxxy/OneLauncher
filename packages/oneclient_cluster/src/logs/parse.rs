@@ -30,6 +30,13 @@ pub fn censor_username(name: &str) {
     }
 }
 
+/// A command-line flag whose following argument is a secret, so a caller that
+/// censors argument by argument can hide the value even when it does not look
+/// like a token
+pub fn is_secret_flag(arg: &str) -> bool {
+    matches!(arg, "--accessToken" | "--session" | "--sessionId")
+}
+
 pub fn censor(line: &str) -> Cow<'_, str> {
     let out = SECRET.replace_all(line, "${1}${2}${3}${4}[censored]");
     let names = NAMES.read().unwrap_or_else(|err| err.into_inner());

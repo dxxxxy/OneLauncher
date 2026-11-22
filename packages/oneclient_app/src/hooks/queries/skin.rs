@@ -4,7 +4,7 @@ use freya::prelude::*;
 use crate::AppAssets;
 
 pub fn use_player_skin(uuid: String) -> (Bytes, bool) {
-    let profile = super::use_player_profile(uuid.clone(), None::<String>);
+    let profile = super::use_player_profile(uuid.clone());
 
     let (skin_url, is_slim) = crate::hooks::settled_or_loading(&profile)
         .map_or((None, false), |profile| (profile.skin_url, profile.is_slim));

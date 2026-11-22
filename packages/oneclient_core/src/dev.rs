@@ -7,7 +7,8 @@ use uuid::Uuid;
 
 use oneclient_content::packages::provider::PackageProviderRegistry;
 use oneclient_events::{
-    Event, EventBus, GameEvent, GroupedProgressEvent, Level, Notification, ProgressEvent,
+    Answer, Choice, ChoiceInput, ChoiceStyle, Event, EventBus, GameEvent, GroupedProgressEvent,
+    InputValue, Level, Notification, ProgressEvent, PromptRequest,
 };
 use oneclient_net::RequestClient;
 
@@ -201,23 +202,95 @@ fn spawn_notification_handler(mut rx: oneclient_events::EventReceiver) {
                         );
                     });
                 }
-                // No TTY dialog here answer `None` so the waiting task fails
-                // cleanly instead of hanging on a prompt nobody can answer
+                // In a terminal the prompt is asked there. Elsewhere it's
+                // dismissed so the waiting task fails cleanly instead of
+                // hanging, unless `ONECLIENT_DEV_PROMPTS=primary` picks the
+                // main choice for unattended runs
                 Event::Notification(Notification::Prompt(request)) => {
-                    let choices: Vec<&str> = request.choices.iter().map(|c| c.id).collect();
-                    mp.suspend(|| {
-                        tracing::warn!(
-                            "{}: {} | choices: {choices:?}",
-                            request.title,
-                            request.body
-                        );
-                        tracing::warn!("prompts are not interactive in dev; dismissing");
-                    });
-                    let _ = request.reply.send(None);
+                    let PromptRequest {
+                        title,
+                        body,
+                        choices,
+                        dismiss,
+                        reply,
+                    } = request;
+                    let answer =
+                        if std::env::var("ONECLIENT_DEV_PROMPTS").as_deref() == Ok("primary") {
+                            let choice = choices
+                                .iter()
+                                .find(|c| c.style == ChoiceStyle::Primary)
+                                .or(choices.first());
+                            mp.suspend(|| {
+                                tracing::info!(
+                                    "{title}: answering {:?}",
+                                    choice.map(|c| c.label.as_str())
+                                );
+                            });
+                            choice.map(|c| Answer {
+                                id: c.id,
+                                input: None,
+                            })
+                        } else if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                            let mp = mp.clone();
+                            tokio::task::spawn_blocking(move || {
+                                mp.suspend(|| ask_in_terminal(&title, &body, &choices, dismiss))
+                            })
+                            .await
+                            .ok()
+                            .flatten()
+                        } else {
+                            mp.suspend(|| {
+                                tracing::warn!("{title}: {body}");
+                                tracing::warn!("no terminal to ask in; dismissing");
+                            });
+                            None
+                        };
+                    let _ = reply.send(answer);
                 }
             }
         }
     });
+}
+
+fn ask_in_terminal(
+    title: &str,
+    body: &str,
+    choices: &[Choice],
+    dismiss: Option<String>,
+) -> Option<Answer> {
+    use std::io::Write;
+
+    fn read_line() -> Option<String> {
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).ok()?;
+        Some(line.trim().to_owned())
+    }
+
+    println!(
+        "
+{title}
+{body}"
+    );
+    for (i, choice) in choices.iter().enumerate() {
+        println!("  {}. {}", i + 1, choice.label);
+    }
+    println!("  0. {}", dismiss.as_deref().unwrap_or("Dismiss"));
+    print!("> ");
+    let picked: usize = read_line()?.parse().ok()?;
+    let choice = choices.get(picked.checked_sub(1)?)?;
+    let input = match &choice.input {
+        Some(ChoiceInput::Folder { title }) => {
+            print!("{title}: ");
+            Some(InputValue::Folder(read_line()?.into()))
+        }
+        // the caller falls back to its default selection
+        Some(ChoiceInput::Selection { .. }) | None => None,
+    };
+    Some(Answer {
+        id: choice.id,
+        input,
+    })
 }
 
 fn refresh_grouped_parent(session: &mut GroupedSessionUi) {
@@ -251,7 +324,13 @@ async fn ephemeral_root() -> LauncherResult<std::path::PathBuf> {
 }
 
 pub async fn ephemeral_state() -> LauncherResult<Arc<LauncherState>> {
-    let root = ephemeral_root().await?;
+    state_at(ephemeral_root().await?).await
+}
+
+/// A launcher kept in `root`, so downloads (Java, game files) survive
+/// between runs. Never point it at a real launcher folder
+pub async fn state_at(root: std::path::PathBuf) -> LauncherResult<Arc<LauncherState>> {
+    polyio::create_dir_all(&root).await?;
     oneclient_common::paths::set_launcher_dir(root.clone());
 
     let (tx, rx) = mpsc::unbounded_channel();
@@ -293,6 +372,7 @@ pub async fn ephemeral_state() -> LauncherResult<Arc<LauncherState>> {
         images: crate::images::ImageCacheStore::new(),
         games: crate::game::GameProcessManager::new(),
         discord: oneclient_discord::DiscordRpc::spawn(false),
+        security: Arc::default(),
     }))
 }
 

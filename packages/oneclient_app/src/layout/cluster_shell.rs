@@ -3,7 +3,7 @@ use freya::prelude::*;
 use freya::router::*;
 use oneclient_common::parse_mc_version;
 
-use crate::components::{Button, Icon, IconType, TabBar, TabItem};
+use crate::components::{Button, Icon, IconType, ProtectionBadge, TabBar, TabItem};
 use crate::hooks::{
     use_bisect, use_cluster, use_dispatch, use_game_snapshot, use_launcher, use_version_metadata,
 };
@@ -32,6 +32,7 @@ pub enum ClusterViewShellTab {
     Textures,
     Worlds,
     DataPacks,
+    Security,
     Settings,
 }
 
@@ -47,6 +48,7 @@ impl ClusterViewShellTab {
             Self::Textures => t("oneclient.layout.cluster.tab.textures"),
             Self::Worlds => t("oneclient.layout.cluster.tab.worlds"),
             Self::DataPacks => t("oneclient.layout.cluster.tab.data_packs"),
+            Self::Security => t("oneclient.layout.cluster.tab.security"),
             Self::Settings => t("oneclient.layout.cluster.tab.settings"),
         }
     }
@@ -62,6 +64,7 @@ impl ClusterViewShellTab {
             Self::Textures => Some(Route::ClusterTextures { cluster_id }),
             Self::Worlds => Some(Route::ClusterWorlds { cluster_id }),
             Self::DataPacks => Some(Route::ClusterDataPacks { cluster_id }),
+            Self::Security => Some(Route::ClusterSecurity { cluster_id }),
             Self::Settings => Some(Route::ClusterSettings { cluster_id }),
         }
     }
@@ -76,8 +79,9 @@ impl ClusterViewShellTab {
             Self::Textures => 5,
             Self::Worlds => 6,
             Self::DataPacks => 7,
-            Self::Settings => 8,
-            Self::GameLog => 9,
+            Self::Security => 8,
+            Self::Settings => 9,
+            Self::GameLog => 10,
         }
     }
 }
@@ -99,6 +103,7 @@ fn route_cluster(route: &Route) -> Option<(i64, ClusterViewShellTab)> {
         Route::ClusterTextures { cluster_id } => (*cluster_id, ClusterViewShellTab::Textures),
         Route::ClusterWorlds { cluster_id } => (*cluster_id, ClusterViewShellTab::Worlds),
         Route::ClusterDataPacks { cluster_id } => (*cluster_id, ClusterViewShellTab::DataPacks),
+        Route::ClusterSecurity { cluster_id } => (*cluster_id, ClusterViewShellTab::Security),
         Route::ClusterSettings { cluster_id } => (*cluster_id, ClusterViewShellTab::Settings),
         _ => return None,
     })
@@ -185,6 +190,7 @@ impl Component for ClusterShell {
                 launch_state,
                 game.is_running(cluster_id),
                 cluster.game_dir().ok(),
+                cluster.folder_name.clone(),
                 sharing,
             )
             .into_element()
@@ -318,6 +324,7 @@ fn cluster_header(
     launch_state: (&'static str, bool),
     running: bool,
     folder: Option<std::path::PathBuf>,
+    folder_name: String,
     mut sharing: State<bool>,
 ) -> impl IntoElement {
     let (launch_label, launch_enabled) = launch_state;
@@ -383,6 +390,11 @@ fn cluster_header(
                     )
                 })
                 .child(
+                    rect()
+                        .padding(Gaps::new(0., 4., 0., 4.))
+                        .child(ProtectionBadge::new(cluster_id, folder_name).size(18.)),
+                )
+                .child(
                     Button::new()
                         .primary()
                         .large()
@@ -414,6 +426,7 @@ fn cluster_tabs(
         Some(ClusterViewShellTab::Textures),
         Some(ClusterViewShellTab::Worlds),
         show_datapacks.then_some(ClusterViewShellTab::DataPacks),
+        Some(ClusterViewShellTab::Security),
         Some(ClusterViewShellTab::Settings),
         show_game_log.then_some(ClusterViewShellTab::GameLog),
     ];

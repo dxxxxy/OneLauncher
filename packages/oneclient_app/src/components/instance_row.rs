@@ -2,7 +2,9 @@ use freya::prelude::*;
 use oneclient_core::clusters::Cluster;
 
 use crate::components::cluster_menu::open_menu_at;
-use crate::components::{ART_PREVIEW_EDGE, ClusterContextMenu, ClusterMenuTarget, DynamicArt};
+use crate::components::{
+    ART_PREVIEW_EDGE, ClusterContextMenu, ClusterMenuTarget, DynamicArt, ProtectionBadge,
+};
 use crate::theme::{colors, rounded, text_size};
 use crate::ui::{border_all_color, last_played_label};
 use crate::utils::{GridSelection, ReleaseLine, line_art_key, line_title};
@@ -19,6 +21,8 @@ pub struct InstanceRow {
     selected: bool,
     on_press: EventHandler<Event<PressEventData>>,
     menu: Option<ClusterMenuTarget>,
+    /// Instances only: the cluster and its folder, for the shield
+    badge: Option<(i64, String)>,
 }
 
 impl InstanceRow {
@@ -41,6 +45,7 @@ impl InstanceRow {
             selected,
             on_press: on_press.into(),
             menu: None,
+            badge: Some((cluster.id, cluster.folder_name.clone())),
         }
     }
 
@@ -61,6 +66,7 @@ impl InstanceRow {
             selected,
             on_press: on_press.into(),
             menu: None,
+            badge: None,
         }
     }
 }
@@ -74,6 +80,7 @@ impl PartialEq for InstanceRow {
             && self.art == other.art
             && self.selected == other.selected
             && self.menu == other.menu
+            && self.badge == other.badge
     }
 }
 
@@ -122,7 +129,9 @@ impl Component for InstanceRow {
             .a11y_focusable(true)
             .a11y_role(AccessibilityRole::Button)
             .on_press(move |e| on_press.call(e))
-            .maybe(self.menu.is_some(), |el| el.on_secondary_down(open_menu_at(menu_at)))
+            .maybe(self.menu.is_some(), |el| {
+                el.on_secondary_down(open_menu_at(menu_at))
+            })
             .on_pointer_enter(move |_| hovering.set(true))
             .on_pointer_leave(move |_| hovering.set(false))
             .maybe_child(self.menu.clone().map(|target| {
@@ -162,6 +171,11 @@ impl Component for InstanceRow {
                             .text_overflow(TextOverflow::Ellipsis)
                             .color(colors::fg_secondary()),
                     ),
+            )
+            .maybe_child(
+                self.badge
+                    .clone()
+                    .map(|(id, folder)| ProtectionBadge::new(id, folder).into_element()),
             )
             .child(
                 label()

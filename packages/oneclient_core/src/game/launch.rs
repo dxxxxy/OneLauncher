@@ -1,5 +1,5 @@
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -428,6 +428,23 @@ async fn start(
 
     let arg_map = version_info.arguments.clone().unwrap_or_default();
 
+    let protected = protect_launch(state, &cluster, &cwd, &java.absolute_path, account).await?;
+    // after the sandbox's grants, so they never spread through the links
+    let assets = if protected.sandbox.is_sandboxed() {
+        match sandboxed_assets(&cluster.dir()?, &assets).await {
+            Ok(view) => view,
+            Err(err) => {
+                tracing::warn!(
+                    cluster_id,
+                    "could not set up the instance's skin cache: {err}"
+                );
+                assets
+            }
+        }
+    } else {
+        assets
+    };
+
     let classpaths = arguments::classpaths(
         &libraries,
         &version_info.libraries,
@@ -448,7 +465,16 @@ async fn start(
         jvm_args_with(profile.launch_args.as_deref(), extra_jvm_arg),
         &java.os_arch,
         java.major,
+        runtime_has_module(&java.absolute_path, "jdk.incubator.vector"),
     )?;
+    if protected.sandbox.is_sandboxed() {
+        sandboxed_natives(
+            &mut jvm_args,
+            &natives,
+            &cluster.dir()?.join(".oneclient").join("natives"),
+        );
+    }
+    jvm_args.splice(0..0, protected.jvm_arguments());
 
     let mods_dir = paths::cluster_mods_dir(&cluster.folder_name)?;
     if let Some(arg) = crate::game::mods_folder_argument(
@@ -474,7 +500,8 @@ async fn start(
     let mut mc_args = arguments::minecraft_arguments(
         arg_map.get(&ArgumentType::Game).map(Vec::as_slice),
         version_info.minecraft_arguments.as_deref(),
-        &account.access_token,
+        // the game never holds the real token, only one the broker answers for
+        &protected.game_token,
         &account.username,
         account.id,
         &version.id,
@@ -518,6 +545,7 @@ async fn start(
     }
 
     apply_env(&mut command, &profile);
+    protected.apply_env(&mut command);
 
     command
         .args(jvm_args)
@@ -555,23 +583,28 @@ async fn start(
         Err(err) => Err(err),
     };
 
-    match handles {
-        Ok((out, err)) => {
-            command.stdout(Stdio::from(out)).stderr(Stdio::from(err));
-        }
+    let (out, err) = match handles {
+        Ok((out, err)) => (Some(out), Some(err)),
         Err(err) => {
             tracing::warn!(cluster_id, error = %err, "failed to open game log; discarding output");
-            command.stdout(Stdio::null()).stderr(Stdio::null());
+            (None, None)
         }
-    }
-    command.stdin(Stdio::null());
-    detach(&mut command);
+    };
+    let spec = if protected.sandbox.is_sandboxed() {
+        oneclient_sandbox::SpawnSpec::from_command(command.as_std(), out, err)
+    } else {
+        oneclient_sandbox::SpawnSpec::inheriting(command.as_std(), out, err)
+    };
 
-    let mut child = command.spawn().map_err(|err| match &wrapper {
-        Some(program) => GameError::wrapper_spawn(program, &err),
-        None => GameError::Spawn(err.to_string()),
-    })?;
+    let mut child = protected
+        .sandbox
+        .spawn(spec)
+        .map_err(|err| match &wrapper {
+            Some(program) => GameError::wrapper_spawn(program, &err),
+            None => GameError::Spawn(err.to_string()),
+        })?;
     let pid = child.id();
+    protected.keep(state, cluster_id);
 
     stage(LaunchStage::Running);
     state.games.set_pid(cluster_id, pid);
@@ -635,6 +668,7 @@ async fn start(
             Err(err) => Exit::Failed(err.to_string()),
         };
 
+        state.security.drop_broker(cluster.id);
         finalize_session(
             &state,
             &cluster,
@@ -665,24 +699,17 @@ async fn running_cluster_name(state: &Arc<LauncherState>, cluster_id: i64) -> St
         .map_or_else(|_| format!("Cluster {cluster_id}"), |cluster| cluster.name)
 }
 
-/// Cuts the game loose from the launcher's process group/console so signals
-/// aimed at the launcher (Ctrl-C console close) don't reach the game
-fn detach(command: &mut Command) {
-    #[cfg(unix)]
+/// Asks the game to close. Under bubblewrap the PID we hold is bwrap's, which
+/// doesn't pass signals on, so the whole process group is asked instead
+fn stop_gracefully(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
     {
-        use std::os::unix::process::CommandExt;
-        command.as_std_mut().process_group(0);
+        // SAFETY: plain kill(2) on the group the game was started in
+        if unsafe { libc::kill(-(pid as i32), libc::SIGTERM) } == 0 {
+            return true;
+        }
     }
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        command
-            .as_std_mut()
-            .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-    }
+    crate::game::kill_process(pid)
 }
 
 #[cfg(unix)]
@@ -723,10 +750,10 @@ const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(7);
 /// runs its shutdown hooks, and the kill is only the fallback for a game that
 /// will not go.
 async fn stop_child(
-    child: &mut tokio::process::Child,
+    child: &mut oneclient_sandbox::GameChild,
 ) -> std::io::Result<std::process::ExitStatus> {
     if let Some(pid) = child.id()
-        && crate::game::kill_process(pid)
+        && stop_gracefully(pid)
     {
         match tokio::time::timeout(GRACEFUL_STOP_TIMEOUT, child.wait()).await {
             Ok(status) => return status,
@@ -1095,9 +1122,17 @@ fn command_line(command: &std::process::Command, main_class: &str) -> String {
     }
     out += &shell_quote(&command.get_program().to_string_lossy());
 
+    let mut secret_next = false;
     for arg in command.get_args() {
-        let arg = arg.to_string_lossy();
-        let arg = oneclient_cluster::logs::censor(&arg);
+        let raw = arg.to_string_lossy();
+        let arg = if std::mem::replace(
+            &mut secret_next,
+            oneclient_cluster::logs::is_secret_flag(&raw),
+        ) {
+            std::borrow::Cow::Borrowed("[censored]")
+        } else {
+            oneclient_cluster::logs::censor(&raw)
+        };
         out += if arg.starts_with('-') || arg == main_class {
             CONTINUATION
         } else {
@@ -1244,6 +1279,57 @@ fn stderr_detail(bytes: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn sandboxed_assets_link_the_shared_files_and_keep_skins_private() {
+        let shared = polyio::tempdir().await.expect("shared dir");
+        let cluster = polyio::tempdir().await.expect("cluster dir");
+        let (shared, cluster) = (shared.dir_path(), cluster.dir_path());
+        polyio::create_dir_all(shared.join("objects/ab"))
+            .await
+            .unwrap();
+        polyio::write(shared.join("objects/ab/abcd"), b"sound")
+            .await
+            .unwrap();
+        polyio::create_dir_all(shared.join("indexes"))
+            .await
+            .unwrap();
+        polyio::create_dir_all(shared.join("skins")).await.unwrap();
+
+        let view = sandboxed_assets(cluster, shared).await.unwrap();
+        // twice: a later launch reuses the links
+        assert_eq!(sandboxed_assets(cluster, shared).await.unwrap(), view);
+
+        assert_eq!(
+            polyio::read(view.join("objects/ab/abcd")).await.unwrap(),
+            b"sound"
+        );
+        assert!(view.join("indexes").is_dir());
+        let skins = polyio::symlink_metadata(view.join("skins")).await.unwrap();
+        assert!(skins.is_dir() && !skins.file_type().is_symlink());
+        polyio::write(view.join("skins/new.png"), b"png")
+            .await
+            .unwrap();
+        assert!(!shared.join("skins/new.png").exists());
+    }
+
+    #[test]
+    fn command_line_censors_a_token_that_is_not_a_jwt() {
+        let mut command = std::process::Command::new("java");
+        command.args([
+            "net.minecraft.client.main.Main",
+            "--accessToken",
+            "plainopaquetoken123",
+            "--version",
+            "1.8.9",
+        ]);
+
+        let line = command_line(&command, "net.minecraft.client.main.Main");
+
+        assert!(!line.contains("plainopaquetoken123"), "{line}");
+        assert!(line.contains("[censored]"), "{line}");
+        assert!(line.contains("1.8.9"), "{line}");
+    }
+
     fn clean() -> Exit {
         Exit::Observed {
             code: Some(0),
@@ -1308,7 +1394,60 @@ mod tests {
 
 #[cfg(test)]
 mod jvm_arg_tests {
-    use super::jvm_args_with;
+    use super::{jvm_args_with, release_lists, sandboxed_natives};
+
+    #[test]
+    fn sandboxed_games_unpack_natives_into_their_own_folder() {
+        let root = std::env::temp_dir().join(format!("oneclient-natives-{}", uuid::Uuid::new_v4()));
+        let shared = root.join("metadata").join("natives").join("26.3");
+        let legacy = root.join("metadata").join("natives").join("1.8.9");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("lwjgl64.dll"), b"").unwrap();
+        let private = root.join("instance").join(".oneclient").join("natives");
+
+        let mut args = vec![
+            format!("-Djava.library.path={}/java", shared.display()),
+            format!(
+                "-Dorg.lwjgl.system.SharedLibraryExtractPath={}/lwjgl",
+                shared.display()
+            ),
+            "-Djna.tmpdir=C:/elsewhere".to_string(),
+            "-Xmx2G".to_string(),
+        ];
+        sandboxed_natives(&mut args, &shared, &private);
+        assert_eq!(
+            args[0],
+            format!("-Djava.library.path={}", private.join("java").display())
+        );
+        assert_eq!(
+            args[1],
+            format!(
+                "-Dorg.lwjgl.system.SharedLibraryExtractPath={}",
+                private.join("lwjgl").display()
+            )
+        );
+        assert_eq!(args[2], "-Djna.tmpdir=C:/elsewhere");
+        assert_eq!(args[3], "-Xmx2G");
+
+        // natives the launcher unpacked stay put
+        let mut old = vec![format!("-Djava.library.path={}", legacy.display())];
+        sandboxed_natives(&mut old, &legacy, &private);
+        assert_eq!(old[0], format!("-Djava.library.path={}", legacy.display()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_vector_module_is_only_named_when_the_runtime_ships_it() {
+        let temurin = "JAVA_VERSION=\"25\"
+MODULES=\"java.base jdk.incubator.vector jdk.jfr\"
+";
+        let jbr = "JAVA_VERSION=\"25.0.4\"
+MODULES=\"java.base java.desktop jdk.jfr\"
+";
+        assert!(release_lists(temurin, "jdk.incubator.vector"));
+        assert!(!release_lists(jbr, "jdk.incubator.vector"));
+        assert!(!release_lists("", "jdk.incubator.vector"));
+    }
 
     #[test]
     fn the_extra_argument_lands_after_the_profile() {
@@ -1317,4 +1456,394 @@ mod jvm_arg_tests {
         assert_eq!(jvm_args_with(Some("-Xss2m"), None), "-Xss2m");
         assert_eq!(jvm_args_with(None, None), "");
     }
+}
+
+/// Some runtimes leave the incubator modules out (JetBrains Runtime, jlinked
+/// JREs), so this reads the module list from the runtime's `release` file.
+/// Without one it answers no: the flags that need a module are optional
+fn runtime_has_module(java_path: &str, module: &str) -> bool {
+    let Some(home) = Path::new(java_path).parent().and_then(Path::parent) else {
+        return false;
+    };
+    std::fs::read_to_string(home.join("release"))
+        .is_ok_and(|release| release_lists(&release, module))
+}
+
+fn release_lists(release: &str, module: &str) -> bool {
+    release
+        .lines()
+        .filter_map(|line| line.strip_prefix("MODULES="))
+        .any(|modules| {
+            modules
+                .trim_matches('"')
+                .split_whitespace()
+                .any(|m| m == module)
+        })
+}
+
+/// The sandbox and the broker for one launch
+struct ProtectedLaunch {
+    sandbox: oneclient_sandbox::Prepared,
+    broker: Option<(
+        oneclient_broker::LaunchDescriptor,
+        oneclient_broker::RunningBroker,
+    )>,
+    /// The agent jar, when the game gets one
+    agent: Option<PathBuf>,
+    /// Rich presence for sandboxed games, which can't reach Discord
+    discord: Option<oneclient_broker::DiscordRelay>,
+    game_token: String,
+    home: PathBuf,
+    temp: PathBuf,
+}
+
+impl ProtectedLaunch {
+    fn jvm_arguments(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        match (&self.agent, &self.broker) {
+            (Some(jar), Some((_, running))) => {
+                args.extend(oneclient_broker::agent::jvm_arguments(jar, running));
+            }
+            (Some(jar), None) => args.push(format!("-javaagent:{}", jar.display())),
+            (None, _) => {}
+        }
+        if self.sandbox.is_sandboxed() {
+            let temp = self.temp.display();
+            args.extend([
+                "-Doneclient.sandboxed=true".to_string(),
+                format!("-Djava.io.tmpdir={temp}"),
+                format!("-Djna.tmpdir={temp}"),
+                format!("-Dorg.lwjgl.system.SharedLibraryExtractPath={temp}"),
+                format!("-Duser.home={}", self.home.display()),
+                // hsperfdata would otherwise go to the real temp folder
+                "-XX:-UsePerfData".to_string(),
+            ]);
+        }
+        if let Some(property) = self.discord.as_ref().and_then(|r| r.jvm_property()) {
+            args.push(property);
+        }
+        args
+    }
+
+    fn apply_env(&self, command: &mut Command) {
+        if let Some((descriptor, _)) = &self.broker {
+            command.env(oneclient_broker::KEY_ENV, &descriptor.key);
+        }
+        if self.sandbox.is_sandboxed() {
+            let roaming = self.home.join("AppData").join("Roaming");
+            let local = self.home.join("AppData").join("Local");
+            command
+                .env("HOME", &self.home)
+                .env("USERPROFILE", &self.home)
+                .env("APPDATA", roaming)
+                .env("LOCALAPPDATA", local)
+                .env("TMP", &self.temp)
+                .env("TEMP", &self.temp)
+                .env("TMPDIR", &self.temp)
+                .env("XDG_CONFIG_HOME", self.home.join(".config"))
+                .env("XDG_DATA_HOME", self.home.join(".local").join("share"))
+                .env("XDG_CACHE_HOME", self.home.join(".cache"));
+            // NVIDIA's driver keeps compiled shaders under the real
+            // LocalAppData, which the sandbox can't write, so every launch
+            // compiled them all again; it only uses a folder that exists
+            if std::env::var_os("__GL_SHADER_DISK_CACHE_PATH").is_none() {
+                let shaders = self.home.join(".cache").join("nvidia");
+                if std::fs::create_dir_all(&shaders).is_ok() {
+                    command.env("__GL_SHADER_DISK_CACHE_PATH", shaders);
+                }
+            }
+            // Discord libraries look for the socket in TMPDIR on macOS, and
+            // the instance's temp path is too long for a socket
+            #[cfg(target_os = "macos")]
+            if let Some(dir) = self.discord.as_ref().and_then(|r| r.path().parent()) {
+                command.env("TMPDIR", dir);
+            }
+        }
+    }
+
+    /// The broker must outlive this function, and the launcher if need be
+    fn keep(self, state: &Arc<LauncherState>, cluster_id: i64) {
+        state
+            .security
+            .set_protection(cluster_id, self.sandbox.protection.clone());
+        if let Some((_, running)) = self.broker {
+            state.security.keep_broker(cluster_id, running);
+        }
+        if let Some(relay) = self.discord {
+            state.security.keep_discord_relay(cluster_id, relay);
+        }
+    }
+}
+
+/// The `-D` properties naming folders the game unpacks native libraries into
+const NATIVES_PROPERTIES: [&str; 4] = [
+    "-Djava.library.path=",
+    "-Djna.tmpdir=",
+    "-Dorg.lwjgl.system.SharedLibraryExtractPath=",
+    "-Dio.netty.native.workdir=",
+];
+
+/// Since 26.1 the game unpacks its own native libraries into folders under
+/// the shared natives folder, which the sandbox can only read. It has to stay
+/// that way: an instance that could write there could plant a DLL every other
+/// instance loads. Sandboxed games unpack into their own folder instead.
+/// Natives the launcher unpacked itself (older versions) stay where they are
+fn sandboxed_natives(args: &mut [String], shared: &Path, private: &Path) {
+    for arg in args.iter_mut() {
+        let Some(property) = NATIVES_PROPERTIES.iter().find(|p| arg.starts_with(**p)) else {
+            continue;
+        };
+        let value = PathBuf::from(&arg[property.len()..]);
+        let Ok(rest) = value.strip_prefix(shared) else {
+            continue;
+        };
+        let unpacked_by_launcher = std::fs::read_dir(&value).is_ok_and(|mut d| d.next().is_some());
+        if *property == "-Djava.library.path=" && unpacked_by_launcher {
+            continue;
+        }
+        *arg = format!("{property}{}", private.join(rest).display());
+    }
+}
+
+/// Starts the Discord relay in a short private directory: socket paths are
+/// limited to about 100 bytes. Linux shows it inside the sandbox at
+/// `$XDG_RUNTIME_DIR/discord-ipc-0`; macOS points the game's `TMPDIR` at it
+#[cfg(unix)]
+fn start_discord_relay(
+    cluster_id: i64,
+    host: Arc<crate::security::LauncherBrokerHost>,
+) -> Option<oneclient_broker::DiscordRelay> {
+    let root = if cfg!(target_os = "macos") {
+        std::env::temp_dir()
+    } else {
+        PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?)
+    };
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let dir = root.join(format!("oneclient-discord-{}", &id[..12]));
+    oneclient_broker::DiscordRelay::start(cluster_id, host, dir)
+        .inspect_err(|err| tracing::warn!(cluster_id, "no Discord relay: {err}"))
+        .ok()
+}
+
+/// The game writes downloaded skins into `<assets>/skins`, but the shared
+/// assets folder is read-only in the sandbox. Each sandboxed instance gets
+/// its own assets folder instead: links to everything shared (nothing is
+/// copied) plus a real `skins` folder, so instances never share a writable
+/// cache
+async fn sandboxed_assets(cluster_dir: &Path, shared: &Path) -> LauncherResult<PathBuf> {
+    let view = cluster_dir.join(".oneclient").join("assets");
+    polyio::create_dir_all(view.join("skins")).await?;
+    let mut entries = polyio::read_dir(shared).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name();
+        if name == "skins" || !entry.file_type().await?.is_dir() {
+            continue;
+        }
+        let link = view.join(&name);
+        if polyio::symlink_metadata(&link).await.is_ok() {
+            continue;
+        }
+        polyio::symlink_dir(entry.path(), &link).await?;
+    }
+    Ok(view)
+}
+
+async fn protect_launch(
+    state: &Arc<LauncherState>,
+    cluster: &oneclient_cluster::Cluster,
+    game_dir: &Path,
+    java_path: &str,
+    account: &oneclient_auth::MinecraftAccount,
+) -> LauncherResult<ProtectedLaunch> {
+    use crate::security::{InstanceSecurity, LauncherBrokerHost};
+
+    let settings = InstanceSecurity::load(cluster.id).await;
+    let cluster_dir = cluster.dir()?;
+    let private = cluster_dir.join(".oneclient");
+    let home = private.join("home");
+    let temp = private.join("tmp");
+    let metadata = paths::metadata_dir()?;
+    let host =
+        |sandboxed| Arc::new(LauncherBrokerHost::new(state, cluster, cluster_dir.clone(), sandboxed));
+
+    // Unix: the relay socket has to exist before the sandbox is built around it
+    #[cfg(unix)]
+    let unix_discord = if settings.sandbox {
+        start_discord_relay(cluster.id, host(true))
+    } else {
+        None
+    };
+
+    let sandbox = if settings.sandbox {
+        let microphone = match settings.microphone {
+            Some(choice) => choice,
+            None => {
+                crate::security::has_voice_mod(&paths::cluster_mods_dir(&cluster.folder_name)?)
+                    .await
+                    || crate::security::has_voice_mod(&game_dir.join("mods")).await
+            }
+        };
+        // the game reads and writes all of its own folder
+        for dir in [game_dir, cluster_dir.as_path()] {
+            if let Some(reason) = oneclient_sandbox::game_dir_refusal(dir) {
+                return Err(GameError::UnsafeGameDir {
+                    dir: dir.display().to_string(),
+                    reason: reason.to_string(),
+                }
+                .into());
+            }
+        }
+        // grants saved before a folder holding something sensitive was
+        // refused are dropped, not applied
+        let grants: Vec<_> = settings
+            .grants
+            .iter()
+            .filter(|g| match oneclient_sandbox::grant_refusal(&g.path) {
+                Some(reason) => {
+                    tracing::warn!(
+                        cluster_id = cluster.id,
+                        path = %g.path.display(),
+                        reason,
+                        "not sharing a folder that holds something sensitive"
+                    );
+                    state
+                        .services
+                        .events
+                        .notify("A shared folder was left out")
+                        .body(format!(
+                            "{} holds {reason}, so the game can't have it. Share a folder inside it instead.",
+                            g.path.display()
+                        ))
+                        .error()
+                        .send();
+                    false
+                }
+                None => true,
+            })
+            .collect();
+        let mut extra_read_only: Vec<PathBuf> = grants
+            .iter()
+            .filter(|g| !g.write)
+            .map(|g| g.path.clone())
+            .collect();
+        let extra_read_write = grants
+            .iter()
+            .filter(|g| g.write)
+            .map(|g| g.path.clone())
+            .collect();
+        // a custom Java outside the launcher's own folder
+        let java_root = Path::new(java_path)
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf);
+        if let Some(root) = java_root.filter(|root| !root.starts_with(&metadata)) {
+            extra_read_only.push(root);
+        }
+        let mut read_write = vec![cluster_dir.clone()];
+        if !game_dir.starts_with(&cluster_dir) {
+            read_write.push(game_dir.to_path_buf());
+        }
+        let policy = oneclient_sandbox::SandboxPolicy {
+            instance_id: cluster.id,
+            runtime: vec![metadata.clone()],
+            read_write,
+            extra_read_only,
+            extra_read_write,
+            home: home.clone(),
+            temp: temp.clone(),
+            microphone,
+            localhost: settings.localhost,
+            #[cfg(unix)]
+            discord_socket: unix_discord.as_ref().map(|r| r.path().to_path_buf()),
+            #[cfg(not(unix))]
+            discord_socket: None,
+            offline: false,
+        };
+        oneclient_sandbox::prepare(&policy)
+            .await
+            .map_err(|err| GameError::Sandbox(err.to_string()))?
+    } else {
+        oneclient_sandbox::unsandboxed(oneclient_sandbox::SANDBOX_OFF)
+    };
+    tracing::info!(cluster_id = cluster.id, protection = ?sandbox.protection, "game protection");
+
+    #[cfg(unix)]
+    let discord = unix_discord.filter(|_| sandbox.is_sandboxed());
+    #[cfg(windows)]
+    let discord = if sandbox.is_sandboxed() {
+        oneclient_broker::DiscordRelay::start(
+            cluster.id,
+            host(true),
+            sandbox.app_container_sid.as_deref(),
+        )
+        .inspect_err(|err| tracing::warn!(cluster_id = cluster.id, "no Discord relay: {err}"))
+        .ok()
+    } else {
+        None
+    };
+
+    let broker = if account.is_microsoft() && !account.access_token.is_empty() {
+        let descriptor = oneclient_broker::LaunchDescriptor::new(
+            cluster.id,
+            account.id,
+            vec![game_dir.to_path_buf(), cluster_dir.clone()],
+            sandbox.app_container_sid.clone(),
+            cfg!(unix).then(|| private.join("broker")),
+        );
+        let host = host(sandbox.is_sandboxed());
+        let running =
+            oneclient_broker::start(&descriptor, host, state.services.requester.http().clone())
+                .map_err(|err| GameError::Broker(err.to_string()))?;
+        Some((descriptor, running))
+    } else {
+        None
+    };
+
+    // marks where this launch's activity starts
+    if broker.is_some() || sandbox.is_sandboxed() {
+        state.security.push(oneclient_broker::Activity::now(
+            cluster.id,
+            oneclient_broker::ActivityKind::Launched,
+        ));
+    }
+
+    let saved = crate::security::SavedSession {
+        broker: broker.as_ref().map(|(descriptor, _)| descriptor.clone()),
+        discord: discord.as_ref().map(|relay| relay.path().to_path_buf()),
+        app_container_sid: sandbox.app_container_sid.clone(),
+        protection: Some(sandbox.protection.clone()),
+    };
+    if !saved.is_empty() {
+        saved
+            .save(cluster.id)
+            .await
+            .map_err(|err| GameError::Broker(err.to_string()))?;
+    }
+
+    // the broker needs the agent, and so does a sandboxed game on its own
+    // (fullscreen, Discord, paths the sandbox can't list)
+    let agent = if broker.is_some() || sandbox.is_sandboxed() {
+        Some(
+            oneclient_broker::agent::install(&metadata.join("agent"))
+                .await
+                .map_err(|err| GameError::Broker(err.to_string()))?,
+        )
+    } else {
+        None
+    };
+
+    let game_token = match &broker {
+        Some((descriptor, _)) => descriptor.fake_token.clone(),
+        None => account.access_token.clone(),
+    };
+
+    Ok(ProtectedLaunch {
+        sandbox,
+        broker,
+        agent,
+        discord,
+        game_token,
+        home,
+        temp,
+    })
 }
