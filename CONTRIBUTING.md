@@ -55,6 +55,32 @@ The app crate is `oneclient_app`:
 After you finish making your changes and committed them to your branch, run
 `cargo fmt` and `cargo clippy` to fix style inconsistencies and catch lints.
 
+### Testing the game protection
+
+Games run in a sandbox and get a fake Minecraft token; the launcher swaps in
+the real one only for requests it allows (`oneclient_broker`,
+`oneclient_sandbox`). To check it:
+
+- `cargo test -p oneclient_broker` - the token rules, the prompts, and a red
+  team of attacks a hostile mod could make over the real pipes. The agent
+  tests need Java 11+ (`java` on `PATH` or `ONECLIENT_TEST_JAVA`) and are
+  skipped without it.
+- What a sandboxed process can reach: `cargo test -p oneclient_sandbox --test escape`
+  on Windows, `cargo test -p oneclient_sandbox --test escape_unix -- --nocapture --test-threads=1`
+  on Linux and macOS (it prints which backend ran).
+- A real game: `cargo run -p oneclient_core --example sandbox_launch -- 1.21.4`
+  (add `fabric` for a modded one). It launches with an offline account,
+  waits for the main menu, checks the running game from outside (on Linux),
+  stops it like the stop button does, and exits with 1 if anything failed.
+  The first run downloads Java and the game into `target/sandbox-launch`.
+- In the app (`cargo run -p oneclient_app`), each instance has a **Security**
+  tab: how well this system protects it, what the game did with the account,
+  the rules for account changes, and shared folders.
+
+On Linux the sandbox needs `bubblewrap`. Ubuntu 23.10 and later block it with
+AppArmor by default, so games fall back to Landlock, which protects less, and
+the Security tab says so.
+
 ### Packaging
 
 Installers are built with [cargo-packager] (config in
