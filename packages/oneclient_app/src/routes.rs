@@ -15,7 +15,8 @@ use crate::view::{
         browser::{Browser, BrowserPackage},
         cluster::{
             ClusterDataPacks, ClusterLogs, ClusterMods, ClusterOverview, ClusterScreenshots,
-            ClusterSettings, ClusterShaders, ClusterTextures, ClusterWorlds, ProcessLogs,
+            ClusterSecurity, ClusterSettings, ClusterShaders, ClusterTextures, ClusterWorlds,
+            ProcessLogs,
         },
         settings::{
             SettingsAccounts, SettingsApis, SettingsAppearance, SettingsChangelog,
@@ -85,6 +86,8 @@ pub enum Route {
                 ClusterWorlds { cluster_id: i64 },
                 #[route("/app/clusters/:cluster_id/datapacks")]
                 ClusterDataPacks { cluster_id: i64 },
+                #[route("/app/clusters/:cluster_id/security")]
+                ClusterSecurity { cluster_id: i64 },
                 #[route("/app/clusters/:cluster_id/settings")]
                 ClusterSettings { cluster_id: i64 },
             #[end_layout]
@@ -162,6 +165,7 @@ impl Route {
             Route::ClusterTextures { .. } => t("oneclient.routes.cluster_textures"),
             Route::ClusterWorlds { .. } => t("oneclient.routes.cluster_worlds"),
             Route::ClusterDataPacks { .. } => t("oneclient.routes.cluster_data_packs"),
+            Route::ClusterSecurity { .. } => t("oneclient.routes.cluster_security"),
             Route::ClusterSettings { .. } => t("oneclient.routes.cluster_settings"),
             Route::Browser { .. } => t("oneclient.routes.browser"),
             Route::BrowserPackage { .. } => t("oneclient.routes.browser_package"),

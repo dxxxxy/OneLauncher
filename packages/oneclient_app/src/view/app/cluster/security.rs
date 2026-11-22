@@ -1,24 +1,27 @@
-//! Instance settings → Security: the sandbox, what it lets through, and what
-//! mods did with the account
+//! Instance → Security: the sandbox, what it lets through, what mods may
+//! change on the profile, and what they did with the account
 
 use freya::prelude::*;
-use oneclient_broker::{Activity, ActivityKind};
+use oneclient_broker::{Activity, ActivityKind, ChangeRule};
 use oneclient_core::security::InstanceSecurity;
 use oneclient_sandbox::Protection;
 
 use crate::components::{
-    Button, Dropdown, IconType, OverlayPopup, caution_card, toggle_controlled,
+    Button, Dropdown, IconType, OverlayPopup, ScrollArea, caution_card, toggle_controlled,
 };
 use crate::i18n::{t, tf};
+use crate::layout::cluster_content;
 use crate::theme::{colors, rounded, text_size};
 use crate::ui::border_all_color;
 use crate::view::app::settings::{section_header, settings_row, settings_row_danger};
 
-const ACTIVITY_SHOWN: usize = 20;
 const DIALOG_WIDTH: f32 = 420.;
+/// The activity box scrolls on its own past this height
+const ACTIVITY_MAX_HEIGHT: f32 = 420.;
+const DROPDOWN_WIDTH: f32 = 220.;
 
 #[derive(PartialEq)]
-pub struct SecuritySection {
+pub struct ClusterSecurity {
     pub cluster_id: i64,
 }
 
@@ -48,8 +51,12 @@ fn protection_card(protection: Option<&Protection>) -> Option<Element> {
 
 fn describe(activity: &Activity) -> String {
     match &activity.kind {
+        ActivityKind::Launched => tf(
+            "oneclient.cluster.security.activity.launched",
+            &[&local_time(activity, "%-d %b, %H:%M")],
+        ),
         ActivityKind::Connected { .. } => {
-            t("oneclient.cluster.security.activity.connected").to_string()
+            t("oneclient.cluster.security.activity.reconnected").to_string()
         }
         ActivityKind::BadHandshake => {
             t("oneclient.cluster.security.activity.bad_handshake").to_string()
@@ -111,6 +118,53 @@ fn describe(activity: &Activity) -> String {
     }
 }
 
+/// One launch's activity: the launch itself (none for what came before the
+/// launcher recorded launches) and what happened during it, newest first
+#[derive(Debug, PartialEq)]
+struct LaunchGroup<'a> {
+    launched: Option<&'a Activity>,
+    entries: Vec<&'a Activity>,
+}
+
+/// Splits activity (newest first, as the launcher keeps it) into launches,
+/// newest first. The game connecting right after its launch says nothing the
+/// launch header doesn't, so only later reconnects are kept
+fn group_by_launch(activity: &[Activity]) -> Vec<LaunchGroup<'_>> {
+    let mut groups = Vec::new();
+    let mut current = LaunchGroup {
+        launched: None,
+        entries: Vec::new(),
+    };
+    let mut connected = false;
+    // oldest first, so each launch collects what follows it
+    for entry in activity.iter().rev() {
+        match entry.kind {
+            ActivityKind::Launched => {
+                if current.launched.is_some() || !current.entries.is_empty() {
+                    groups.push(current);
+                }
+                current = LaunchGroup {
+                    launched: Some(entry),
+                    entries: Vec::new(),
+                };
+                connected = false;
+            }
+            ActivityKind::Connected { .. } if current.launched.is_some() && !connected => {
+                connected = true;
+            }
+            _ => current.entries.push(entry),
+        }
+    }
+    if current.launched.is_some() || !current.entries.is_empty() {
+        groups.push(current);
+    }
+    for group in &mut groups {
+        group.entries.reverse();
+    }
+    groups.reverse();
+    groups
+}
+
 /// A bordered list under a row, styled like the other settings lists
 fn list_card(rows: Vec<Element>) -> Element {
     rect()
@@ -136,12 +190,15 @@ fn list_text(text: String, color: Color) -> Element {
         .into_element()
 }
 
-fn activity_row(activity: &Activity) -> Element {
-    let time = activity
+fn local_time(activity: &Activity, format: &str) -> String {
+    activity
         .at
         .with_timezone(&chrono::Local)
-        .format("%H:%M")
-        .to_string();
+        .format(format)
+        .to_string()
+}
+
+fn activity_row(activity: &Activity) -> Element {
     rect()
         .horizontal()
         .width(Size::fill())
@@ -149,7 +206,7 @@ fn activity_row(activity: &Activity) -> Element {
         .spacing(10.)
         .child(
             label()
-                .text(time)
+                .text(local_time(activity, "%H:%M"))
                 .font_size(text_size(12.5))
                 .color(colors::fg_secondary()),
         )
@@ -164,6 +221,78 @@ fn activity_row(activity: &Activity) -> Element {
         .into_element()
 }
 
+/// The line that opens a launch: when it started, ruled off from the
+/// launch above it
+fn launch_header(launched: Option<&Activity>, first: bool) -> Element {
+    let text = match launched {
+        Some(launch) => tf(
+            "oneclient.cluster.security.activity.launched",
+            &[&local_time(launch, "%-d %b, %H:%M")],
+        ),
+        None => t("oneclient.cluster.security.activity.earlier").to_string(),
+    };
+    let mut header =
+        rect()
+            .width(Size::fill())
+            .padding(Gaps::new(if first { 0. } else { 10. }, 0., 2., 0.));
+    if !first {
+        header = header.border(
+            Border::new()
+                .width(BorderWidth {
+                    top: 1.,
+                    ..Default::default()
+                })
+                .fill(colors::component_border()),
+        );
+    }
+    header
+        .child(
+            label()
+                .text(text)
+                .font_size(text_size(12.5))
+                .font_weight(FontWeight::SEMI_BOLD)
+                .color(colors::fg_strong()),
+        )
+        .into_element()
+}
+
+fn activity_list(activity: &[Activity]) -> Element {
+    let groups = group_by_launch(activity);
+    if groups.is_empty() {
+        return list_card(vec![list_text(
+            t("oneclient.cluster.security.activity.empty").to_string(),
+            colors::fg_secondary(),
+        )]);
+    }
+    let mut rows = Vec::new();
+    for (i, group) in groups.iter().enumerate() {
+        rows.push(launch_header(group.launched, i == 0));
+        if group.entries.is_empty() {
+            rows.push(list_text(
+                t("oneclient.cluster.security.activity.quiet").to_string(),
+                colors::fg_secondary(),
+            ));
+        }
+        rows.extend(group.entries.iter().map(|entry| activity_row(entry)));
+    }
+    rect()
+        .width(Size::fill())
+        .corner_radius(rounded(8.))
+        .background(colors::component_bg())
+        .border(border_all_color(1., colors::component_border()))
+        .overflow(Overflow::Clip)
+        .child(
+            ScrollArea::new()
+                .width(Size::fill())
+                .height(Size::Inner)
+                .max_height(Size::px(ACTIVITY_MAX_HEIGHT))
+                .padding(Gaps::new_all(10.))
+                .spacing(6.)
+                .children(rows),
+        )
+        .into_element()
+}
+
 fn save(mut settings: State<Option<InstanceSecurity>>, cluster_id: i64, next: InstanceSecurity) {
     settings.set(Some(next.clone()));
     spawn(async move {
@@ -173,7 +302,61 @@ fn save(mut settings: State<Option<InstanceSecurity>>, cluster_id: i64, next: In
     });
 }
 
-impl Component for SecuritySection {
+const RULES: [ChangeRule; 3] = [ChangeRule::Allow, ChangeRule::Ask, ChangeRule::Deny];
+
+fn rule_label(rule: ChangeRule) -> String {
+    match rule {
+        ChangeRule::Allow => t("oneclient.cluster.security.changes.allow"),
+        ChangeRule::Ask => t("oneclient.cluster.security.changes.ask"),
+        ChangeRule::Deny => t("oneclient.cluster.security.changes.deny"),
+    }
+    .to_string()
+}
+
+/// A dropdown row for one kind of profile change
+fn rule_row(
+    settings: State<Option<InstanceSecurity>>,
+    cluster_id: i64,
+    current: &InstanceSecurity,
+    icon: IconType,
+    title: &'static str,
+    description: &'static str,
+    field: fn(&mut InstanceSecurity) -> &mut ChangeRule,
+) -> Element {
+    let mut copy = current.clone();
+    let value = *field(&mut copy);
+    let current = current.clone();
+    settings_row(
+        icon,
+        title,
+        description,
+        Dropdown::new(
+            rule_label(value),
+            RULES.iter().map(|r| rule_label(*r)).collect(),
+        )
+        .width(Size::px(DROPDOWN_WIDTH))
+        .height(Size::px(34.))
+        .on_select(move |idx: usize| {
+            if let Some(rule) = RULES.get(idx).copied() {
+                let mut next = current.clone();
+                *field(&mut next) = rule;
+                save(settings, cluster_id, next);
+            }
+        }),
+    )
+    .into_element()
+}
+
+fn access_label(write: bool) -> String {
+    if write {
+        t("oneclient.cluster.security.folders.read_write")
+    } else {
+        t("oneclient.cluster.security.folders.read_only")
+    }
+    .to_string()
+}
+
+impl Component for ClusterSecurity {
     fn render(&self) -> impl IntoElement {
         let cluster_id = self.cluster_id;
         let mut settings = use_state(|| None::<InstanceSecurity>);
@@ -187,7 +370,7 @@ impl Component for SecuritySection {
         });
 
         let Some(current) = settings.read().clone() else {
-            return rect().into_element();
+            return cluster_content().into_element();
         };
         let state = crate::launcher::state().ok();
         let _ = *refresh.read();
@@ -261,7 +444,7 @@ impl Component for SecuritySection {
                     mic_label(current.microphone),
                     mic_options.iter().map(|v| mic_label(*v)).collect(),
                 )
-                .width(Size::px(220.))
+                .width(Size::px(DROPDOWN_WIDTH))
                 .height(Size::px(34.))
                 .on_select(move |idx: usize| {
                     if let Some(value) = mic_options.get(idx).copied() {
@@ -291,6 +474,35 @@ impl Component for SecuritySection {
                 ),
             )
         };
+
+        // ---- profile changes
+        let skin_row = rule_row(
+            settings,
+            cluster_id,
+            &current,
+            IconType::Brush01,
+            t("oneclient.cluster.security.changes.skin.title"),
+            t("oneclient.cluster.security.changes.skin.description"),
+            |s| &mut s.skin_changes,
+        );
+        let name_row = rule_row(
+            settings,
+            cluster_id,
+            &current,
+            IconType::Pencil01,
+            t("oneclient.cluster.security.changes.name.title"),
+            t("oneclient.cluster.security.changes.name.description"),
+            |s| &mut s.name_changes,
+        );
+        let cape_row = rule_row(
+            settings,
+            cluster_id,
+            &current,
+            IconType::LayersThree01,
+            t("oneclient.cluster.security.changes.cape.title"),
+            t("oneclient.cluster.security.changes.cape.description"),
+            |s| &mut s.cape_changes,
+        );
 
         // ---- shared folders
         let add_folder = {
@@ -337,6 +549,9 @@ impl Component for SecuritySection {
                         let mut without = current.clone();
                         without.grants.retain(|g| g.path != grant.path);
                         let revoked = grant.path.clone();
+                        let path = grant.path.clone();
+                        let was_write = grant.write;
+                        let edited = current.clone();
                         rect()
                             .horizontal()
                             .width(Size::fill())
@@ -347,6 +562,32 @@ impl Component for SecuritySection {
                                 grant.path.display().to_string(),
                                 colors::fg_primary(),
                             ))
+                            .child(
+                                Dropdown::new(
+                                    access_label(grant.write),
+                                    vec![access_label(false), access_label(true)],
+                                )
+                                .width(Size::px(160.))
+                                .height(Size::px(30.))
+                                .on_select(move |idx: usize| {
+                                    let write = idx == 1;
+                                    if write == was_write {
+                                        return;
+                                    }
+                                    // taking write away: the next launch grants
+                                    // reading only, so drop what's there now
+                                    if was_write
+                                        && let Err(err) =
+                                            oneclient_sandbox::revoke_grant(cluster_id, &path)
+                                    {
+                                        tracing::warn!("could not revoke a folder grant: {err}");
+                                    }
+                                    let mut next = edited.clone();
+                                    if next.grant(path.clone(), write).is_ok() {
+                                        save(settings, cluster_id, next);
+                                    }
+                                }),
+                            )
                             .child(
                                 Button::new()
                                     .small()
@@ -373,16 +614,6 @@ impl Component for SecuritySection {
                 .into_element()
         });
 
-        // ---- overlays: nothing to set, but users ask why Discord's is gone
-        let overlays_row = current.sandbox.then(|| {
-            settings_row(
-                IconType::LayersThree01,
-                t("oneclient.cluster.security.overlays.title"),
-                t("oneclient.cluster.security.overlays.description"),
-                rect(),
-            )
-        });
-
         // ---- activity
         let activity_row_header = settings_row(
             IconType::Eye,
@@ -394,36 +625,39 @@ impl Component for SecuritySection {
                 .on_press(move |_| *refresh.write() += 1)
                 .text(t("oneclient.cluster.security.activity.refresh")),
         );
-        let activity_list = list_card(if activity.is_empty() {
-            vec![list_text(
-                t("oneclient.cluster.security.activity.empty").to_string(),
-                colors::fg_secondary(),
-            )]
-        } else {
-            activity
-                .iter()
-                .take(ACTIVITY_SHOWN)
-                .map(activity_row)
-                .collect()
-        });
 
-        rect()
-            .vertical()
-            .width(Size::fill())
-            .spacing(4.)
-            .child(section_header(t(
-                "oneclient.cluster.settings.section.security",
-            )))
-            .maybe_child(protection_card(protection.as_ref()))
-            .child(sandbox_row)
-            .child(mic_row)
-            .child(localhost_row)
-            .child(folders_row)
-            .maybe_child(grants)
-            .maybe_child(grant_error)
-            .maybe_child(overlays_row)
-            .child(activity_row_header)
-            .child(activity_list)
+        cluster_content()
+            .child(
+                ScrollArea::new()
+                    .width(Size::fill())
+                    .height(Size::fill())
+                    .scrollbar_gutter(true)
+                    .spacing(4.)
+                    .child(section_header(t(
+                        "oneclient.cluster.security.section.protection",
+                    )))
+                    .append_children(protection_card(protection.as_ref()))
+                    .child(sandbox_row)
+                    .child(mic_row)
+                    .child(localhost_row)
+                    .child(section_header(t(
+                        "oneclient.cluster.security.section.changes",
+                    )))
+                    .child(skin_row)
+                    .child(name_row)
+                    .child(cape_row)
+                    .child(section_header(t(
+                        "oneclient.cluster.security.section.folders",
+                    )))
+                    .child(folders_row)
+                    .append_children(grants)
+                    .append_children(grant_error)
+                    .child(section_header(t(
+                        "oneclient.cluster.security.section.activity",
+                    )))
+                    .child(activity_row_header)
+                    .child(activity_list(&activity)),
+            )
             .maybe_child(confirm_off)
             .into_element()
     }
@@ -500,5 +734,62 @@ impl Component for SandboxOffModal {
                     ),
             )
             .into_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(kind: ActivityKind) -> Activity {
+        Activity::now(1, kind)
+    }
+
+    fn join(caller: &str) -> ActivityKind {
+        ActivityKind::Join {
+            server_hash: String::new(),
+            caller: caller.into(),
+        }
+    }
+
+    fn connected() -> ActivityKind {
+        ActivityKind::Connected {
+            agent_version: "t".into(),
+        }
+    }
+
+    #[test]
+    fn activity_is_grouped_by_launch_newest_first() {
+        // oldest first, then reversed the way the launcher hands it out
+        let mut log = vec![
+            at(join("older")),
+            at(ActivityKind::Launched),
+            at(connected()),
+            at(join("a")),
+            at(connected()),
+            at(ActivityKind::Launched),
+            at(connected()),
+            at(join("b")),
+        ];
+        log.reverse();
+
+        let groups = group_by_launch(&log);
+        let callers = |g: &LaunchGroup<'_>| {
+            g.entries
+                .iter()
+                .map(|e| match &e.kind {
+                    ActivityKind::Join { caller, .. } => caller.clone(),
+                    ActivityKind::Connected { .. } => "reconnected".into(),
+                    other => format!("{other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(groups.len(), 3);
+        assert!(groups[0].launched.is_some());
+        assert_eq!(callers(&groups[0]), ["b"]);
+        // the first connection belongs to the launch; a later one is news
+        assert_eq!(callers(&groups[1]), ["reconnected", "a"]);
+        assert!(groups[2].launched.is_none());
+        assert_eq!(callers(&groups[2]), ["older"]);
     }
 }

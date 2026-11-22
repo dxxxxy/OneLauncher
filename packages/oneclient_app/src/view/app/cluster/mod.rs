@@ -26,6 +26,7 @@ pub(crate) use folder_list::{confirm_dialog, dialog, supports_datapacks};
 pub use mods::ClusterMods;
 pub use process_logs::ProcessLogs;
 pub use screenshots::ClusterScreenshots;
+pub use security::ClusterSecurity;
 pub use shaders::ClusterShaders;
 pub use textures::ClusterTextures;
 pub use worlds::ClusterWorlds;
