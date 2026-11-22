@@ -153,6 +153,24 @@ pub async fn prepare(policy: &SandboxPolicy) -> SandboxResult<Prepared> {
     Ok(unsandboxed("this system has no supported sandbox"))
 }
 
+/// Linux: builds the Landlock fallback even where bubblewrap is installed,
+/// so tests can check both backends on one machine
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub async fn prepare_landlock(policy: &SandboxPolicy) -> SandboxResult<Prepared> {
+    for dir in [&policy.home, &policy.temp] {
+        polyio::create_dir_all(dir)
+            .await
+            .map_err(|e| SandboxError::Setup(e.to_string()))?;
+    }
+    let plan = linux::Plan::build_with(policy, false).await?;
+    Ok(Prepared {
+        protection: plan.protection(),
+        app_container_sid: None,
+        inner: Backend::Linux(plan),
+    })
+}
+
 /// The reason given when the user turned the sandbox off for an instance
 pub const SANDBOX_OFF: &str = "The sandbox is turned off for this instance";
 
