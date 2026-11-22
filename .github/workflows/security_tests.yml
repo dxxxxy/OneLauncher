@@ -52,6 +52,14 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libdbus-1-dev \
             bubblewrap
 
+      # which backend the escape tests get: bubblewrap, or Landlock where
+      # user namespaces are blocked
+      - name: (Linux) Report the sandbox backend
+        if: runner.os == 'Linux'
+        run: |
+          echo "apparmor_restrict_unprivileged_userns: $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo n/a)"
+          if bwrap --ro-bind / / -- /bin/true; then echo "bubblewrap runs"; else echo "bubblewrap is blocked: Landlock only"; fi
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -77,3 +85,8 @@ jobs:
             -p oneclient_auth \
             -p oneclient_cluster \
             -p oneclient_core
+
+      # already built above; shown so a skipped check is visible in the log
+      - name: (Unix) Escape tests, with what they ran on and skipped
+        if: runner.os != 'Windows'
+        run: cargo test -p oneclient_sandbox --test escape_unix -- --nocapture --test-threads=1
