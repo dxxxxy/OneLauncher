@@ -50,7 +50,8 @@ pub enum ChangeKind {
     Name,
     Skin,
     Cape,
-    Profile,
+    /// Anything on a Realm beyond playing on it: worlds, invites, backups
+    Realms,
     Purchases,
     Redeem,
     Settings,
@@ -113,12 +114,24 @@ fn confirm(kind: ChangeKind, what: impl Into<String>) -> Decision {
     }
 }
 
-/// `/minecraft/profile/...` beyond reading it: names, skins and capes
+/// `/minecraft/profile/...` beyond reading it: names, skins and capes.
+/// Segments are matched the way a server may read them, decoded and in any
+/// case, so `NAME` or `n%61me` is still a rename. Anything else is refused:
+/// a vague question about an unknown change is one a user can't answer
 fn profile_change(method: &str, path: &str) -> Decision {
-    let rest = path.trim_start_matches("/minecraft/profile");
-    let segments: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
-    let name = |s: &str| {
-        percent_decode(s)
+    let rest = &path["/minecraft/profile".len()..];
+    if !rest.is_empty() && !rest.starts_with('/') {
+        return deny("not an endpoint the game uses");
+    }
+    let decoded: Vec<String> = rest
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(percent_decode)
+        .collect();
+    let lower: Vec<String> = decoded.iter().map(|s| s.to_ascii_lowercase()).collect();
+    let segments: Vec<&str> = lower.iter().map(String::as_str).collect();
+    let name = || {
+        decoded[1]
             .chars()
             .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
             .take(16)
@@ -126,12 +139,12 @@ fn profile_change(method: &str, path: &str) -> Decision {
     };
     match (method, segments.as_slice()) {
         // looking a name up changes nothing
-        ("GET", ["name", _, "available"]) | ("GET", ["namechange"]) => {
+        ("GET" | "HEAD", ["name", _, "available"]) | ("GET" | "HEAD", ["namechange"]) => {
             Decision::Allow(Route::Plain(TokenPlacement::Bearer))
         }
-        ("PUT", ["name", n]) => confirm(
+        (_, ["name", _]) if method != "GET" && method != "HEAD" => confirm(
             ChangeKind::Name,
-            format!("change your Minecraft name to {}", name(n)),
+            format!("change your Minecraft name to {}", name()),
         ),
         ("POST", ["skins"]) | ("PUT", ["skins", ..]) => {
             confirm(ChangeKind::Skin, "change your skin")
@@ -139,36 +152,111 @@ fn profile_change(method: &str, path: &str) -> Decision {
         ("DELETE", ["skins", ..]) => confirm(ChangeKind::Skin, "reset your skin"),
         ("PUT", ["capes", "active"]) => confirm(ChangeKind::Cape, "change your cape"),
         ("DELETE", ["capes", "active"]) => confirm(ChangeKind::Cape, "hide your cape"),
-        _ => confirm(ChangeKind::Profile, "change your Minecraft profile"),
+        _ => deny("not an endpoint the game uses"),
     }
 }
 
 fn percent_decode(s: &str) -> String {
-    url::form_urlencoded::parse(s.as_bytes())
-        .map(|(k, v)| {
-            if v.is_empty() {
-                k.into_owned()
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        if bytes[i] == b'%'
+            && let (Some(hi), Some(lo)) = (
+                bytes.get(i + 1).copied().and_then(hex),
+                bytes.get(i + 2).copied().and_then(hex),
+            )
+        {
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Realms: playing on a Realm, accepting invites and reading what's there
+/// go through; changing a Realm (deleting or resetting worlds, inviting
+/// players, restoring backups, starting trials) asks first
+fn realms(method: &str, path: &str) -> Decision {
+    let route = Decision::Allow(Route::Plain(TokenPlacement::RealmsCookie));
+    if method == "GET" || method == "HEAD" {
+        return route;
+    }
+    let path = path.to_ascii_lowercase();
+    let player_action = match method {
+        "PUT" => path.starts_with("/invites/accept/") || path.starts_with("/invites/reject/"),
+        "POST" => matches!(
+            path.as_str(),
+            // 26.3's invite codes
+            "/invites/code"
+                | "/regions/ping/stat"
+                | "/notifications/seen"
+                | "/notifications/dismiss"
+                | "/mco/tos/agree"
+        ),
+        _ => false,
+    };
+    if player_action {
+        return route;
+    }
+    Decision::Confirm {
+        placement: TokenPlacement::RealmsCookie,
+        change: AccountChange {
+            kind: ChangeKind::Realms,
+            what: if method == "DELETE" {
+                "delete something on your Realm".into()
             } else {
-                format!("{k}={v}")
-            }
-        })
-        .collect()
+                "make changes to your Realm".into()
+            },
+        },
+    }
+}
+
+/// A path a server could read differently than this policy does: encoded
+/// separators or dots, or a NUL
+fn ambiguous_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    ["%2f", "%5c", "%2e", "%00"]
+        .iter()
+        .any(|encoded| lower.contains(encoded))
 }
 
 pub fn decide(method: &str, url: &Url) -> Decision {
-    if url.scheme() != "https" {
-        return deny("account hosts are only reachable over HTTPS");
-    }
     let Some(host) = url.host_str() else {
         return deny("no host");
     };
+    // a sign-in attempt is one whichever way the host or scheme is spelled
+    let bare = host.trim_end_matches('.');
+    if bare == "authserver.mojang.com" {
+        return alarm("a mod tried to sign in to or out of your account");
+    }
+    if bare != host {
+        return deny("not an account host");
+    }
+    if url.scheme() != "https" {
+        return deny("account hosts are only reachable over HTTPS");
+    }
+    // the real token only ever goes to the hosts' standard port
+    if url.port().is_some() {
+        return deny("account hosts are only reachable on their standard port");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return deny("not an endpoint the game uses");
+    }
+    if ambiguous_path(url.path()) {
+        return deny("not an endpoint the game uses");
+    }
     let method = method.to_ascii_uppercase();
     let get = method == "GET" || method == "HEAD";
     let post = method == "POST";
     let path = url.path().trim_end_matches('/');
 
     use Route::{Join, Plain};
-    use TokenPlacement::{Bearer, None as Public, RealmsCookie};
+    use TokenPlacement::{Bearer, None as Public};
 
     match host {
         "sessionserver.mojang.com" => match path {
@@ -219,12 +307,11 @@ pub fn decide(method: &str, url: &Url) -> Decision {
             }
             _ => deny("not an endpoint the game uses"),
         },
-        // legacy Yggdrasil: password logins and token refresh, the launcher's
-        // job only
-        "authserver.mojang.com" => alarm("a mod tried to sign in to or out of your account"),
+        // legacy Yggdrasil (authserver.mojang.com, password logins and token
+        // refresh, the launcher's job only) raised the alarm above
         "pc.realms.minecraft.net"
         | "java.frontendlegacy.realms.minecraft-services.net"
-        | "java.frontend.realms.minecraft-services.net" => Decision::Allow(Plain(RealmsCookie)),
+        | "java.frontend.realms.minecraft-services.net" => realms(&method, path),
         _ => deny("not an account host"),
     }
 }
@@ -255,15 +342,36 @@ pub fn substitute(
         };
     }
 
-    if !contains(body, fake.as_bytes()) {
+    if placement == TokenPlacement::JsonAccessToken {
+        *body = join_body(body, fake, real);
         return;
     }
-    let replacement = if placement == TokenPlacement::JsonAccessToken {
-        real
-    } else {
-        ""
+    if contains(body, fake.as_bytes()) {
+        *body = replace_bytes(body, fake.as_bytes(), b"");
+    }
+}
+
+/// The join body as it is sent on: written out again from what was parsed,
+/// so the server reads exactly what [`join_names_account`] checked (no
+/// duplicate keys), with the real token in `accessToken` and nowhere else
+fn join_body(body: &[u8], fake: &str, real: &str) -> Vec<u8> {
+    fn strip(value: &mut serde_json::Value, fake: &str) {
+        match value {
+            serde_json::Value::String(s) if s.contains(fake) => *s = s.replace(fake, ""),
+            serde_json::Value::Array(items) => items.iter_mut().for_each(|v| strip(v, fake)),
+            serde_json::Value::Object(map) => map.values_mut().for_each(|v| strip(v, fake)),
+            _ => {}
+        }
+    }
+    let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return replace_bytes(body, fake.as_bytes(), b"");
     };
-    *body = replace_bytes(body, fake.as_bytes(), replacement.as_bytes());
+    let wants_token = json.get("accessToken").and_then(|v| v.as_str()) == Some(fake);
+    strip(&mut json, fake);
+    if wants_token && let Some(map) = json.as_object_mut() {
+        map.insert("accessToken".into(), real.into());
+    }
+    serde_json::to_vec(&json).unwrap_or_default()
 }
 
 /// The join body must name this account; anything else is someone else's
@@ -434,10 +542,162 @@ mod tests {
 
     #[test]
     fn what_no_game_does_raises_the_alarm() {
+        // however the host or scheme is spelled
+        for url in [
+            "https://authserver.mojang.com/authenticate",
+            "https://AUTHSERVER.Mojang.com/refresh",
+            "https://authserver.mojang.com:8443/authenticate",
+            "http://authserver.mojang.com/authenticate",
+            "https://authserver.mojang.com./authenticate",
+        ] {
+            assert!(
+                matches!(d("POST", url), Decision::Deny { alarm: true, .. }),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn renames_are_renames_however_they_are_spelled() {
+        let profile = "https://api.minecraftservices.com/minecraft/profile";
+        for (method, path) in [
+            ("PUT", "/NAME/Stolen"),
+            ("PUT", "/n%61me/Stolen"),
+            ("put", "/Name/Stolen/"),
+            ("POST", "/name/Stolen"),
+        ] {
+            let change = change(method, &format!("{profile}{path}"));
+            assert_eq!(change.kind, ChangeKind::Name, "{method} {path}");
+            assert_eq!(change.what, "change your Minecraft name to Stolen");
+        }
+        // writes the policy doesn't know are refused, not asked about vaguely
+        for (method, path) in [("PUT", ""), ("PATCH", "/whatever"), ("POST", "/name/a/b")] {
+            assert!(
+                matches!(
+                    d(method, &format!("{profile}{path}")),
+                    Decision::Deny { .. }
+                ),
+                "{method} {path}"
+            );
+        }
         assert!(matches!(
-            d("POST", "https://authserver.mojang.com/authenticate"),
-            Decision::Deny { alarm: true, .. }
+            d(
+                "PUT",
+                "https://api.minecraftservices.com/minecraft/profilex/name/a"
+            ),
+            Decision::Deny { .. }
         ));
+    }
+
+    #[test]
+    fn paths_a_server_could_read_differently_are_refused() {
+        for url in [
+            "https://api.minecraftservices.com/minecraft/profile/name/x%2F..%2F..%2Fentitlements%2Fmcstore%3F/available",
+            "https://api.minecraftservices.com/minecraft/profile/name/x%5c/available",
+            "https://api.minecraftservices.com/minecraft/profile/name/%2e%2e/available",
+            "https://sessionserver.mojang.com/session/minecraft/profile/a%00",
+        ] {
+            assert!(matches!(d("GET", url), Decision::Deny { .. }), "{url}");
+        }
+    }
+
+    #[test]
+    fn the_token_only_goes_to_the_standard_port() {
+        assert!(matches!(
+            d(
+                "GET",
+                "https://api.minecraftservices.com:8443/minecraft/profile"
+            ),
+            Decision::Deny { alarm: false, .. }
+        ));
+        // the default port, spelled out, is the same URL
+        assert_eq!(
+            d(
+                "GET",
+                "https://api.minecraftservices.com:443/minecraft/profile"
+            ),
+            Decision::Allow(Route::Plain(TokenPlacement::Bearer))
+        );
+        assert!(matches!(
+            d(
+                "GET",
+                "https://me:pw@api.minecraftservices.com/minecraft/profile"
+            ),
+            Decision::Deny { .. }
+        ));
+        assert!(matches!(
+            d(
+                "GET",
+                "https://api.minecraftservices.com./minecraft/profile"
+            ),
+            Decision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn realms_can_be_played_but_changes_ask() {
+        let realms = "https://pc.realms.minecraft.net";
+        for (method, path) in [
+            ("GET", "/worlds"),
+            ("GET", "/worlds/v1/123/join/pc"),
+            ("PUT", "/invites/accept/9"),
+            ("PUT", "/invites/reject/9"),
+            ("POST", "/regions/ping/stat"),
+            ("POST", "/notifications/seen"),
+        ] {
+            assert_eq!(
+                d(method, &format!("{realms}{path}")),
+                Decision::Allow(Route::Plain(TokenPlacement::RealmsCookie)),
+                "{method} {path}"
+            );
+        }
+        for (method, path) in [
+            ("DELETE", "/worlds/123"),
+            ("PUT", "/worlds/123/close"),
+            ("POST", "/worlds/123/backups"),
+            ("POST", "/invites/123"),
+            ("POST", "/trial"),
+        ] {
+            match d(method, &format!("{realms}{path}")) {
+                Decision::Confirm {
+                    placement: TokenPlacement::RealmsCookie,
+                    change,
+                } => assert_eq!(change.kind, ChangeKind::Realms),
+                other => panic!("{method} {path}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_join_token_lands_in_access_token_only() {
+        let mut body =
+            br#"{"accessToken":"FAKE","selectedProfile":"me","serverId":"FAKE","x":["FAKE"]}"#
+                .to_vec();
+        substitute(
+            TokenPlacement::JsonAccessToken,
+            &mut vec![],
+            &mut body,
+            "FAKE",
+            "REAL",
+        );
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["accessToken"], "REAL");
+        assert_eq!(json["serverId"], "");
+        assert_eq!(json["x"][0], "");
+
+        // what goes out is what was checked: one selectedProfile
+        let mut body =
+            br#"{"accessToken":"FAKE","selectedProfile":"other","selectedProfile":"me"}"#.to_vec();
+        substitute(
+            TokenPlacement::JsonAccessToken,
+            &mut vec![],
+            &mut body,
+            "FAKE",
+            "REAL",
+        );
+        let text = String::from_utf8(body).unwrap();
+        assert_eq!(text.matches("selectedProfile").count(), 1, "{text}");
+        assert!(text.contains(r#""selectedProfile":"me""#), "{text}");
     }
 
     #[test]
