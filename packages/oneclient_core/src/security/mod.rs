@@ -49,6 +49,9 @@ pub struct SecurityService {
     denied_seen: parking_lot::Mutex<std::collections::HashSet<(i64, String)>>,
     /// Discord connections showing a game's own rich presence, per game
     game_presences: parking_lot::Mutex<HashMap<i64, usize>>,
+    /// Counts up whenever activity or protection changes, for views that
+    /// show them live
+    changes: tokio::sync::watch::Sender<u64>,
 }
 
 static GLOBAL: std::sync::OnceLock<Arc<SecurityService>> = std::sync::OnceLock::new();
@@ -162,7 +165,17 @@ impl SecurityService {
         }
         log.push_back(activity.clone());
         drop(log);
+        self.changed();
         tokio::spawn(append_to_disk(activity));
+    }
+
+    /// Wakes whenever activity or an instance's protection changes
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
+    fn changed(&self) {
+        self.changes.send_modify(|n| *n = n.wrapping_add(1));
     }
 
     /// How the running (or last) launch of an instance is protected
@@ -176,6 +189,7 @@ impl SecurityService {
         protection: oneclient_sandbox::Protection,
     ) {
         self.protection.lock().insert(cluster_id, protection);
+        self.changed();
     }
 
     pub(crate) fn keep_broker(&self, cluster_id: i64, broker: RunningBroker) {
@@ -232,6 +246,8 @@ impl SecurityService {
                 log.push_back(activity);
             }
         }
+        drop(log);
+        self.changed();
     }
 }
 
